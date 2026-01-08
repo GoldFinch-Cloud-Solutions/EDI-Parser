@@ -57,13 +57,13 @@ heroku config:set SFTP_REMOTE_PATH=/EDI_Orders
 ### View Current Config
 
 ```bash
-heroku config -a sftpserver-edi
+heroku config -a sftpserver-uat-edi
 ```
 
 ### View Logs
 
 ```bash
-heroku logs --tail -a sftpserver-edi
+heroku logs --tail -a sftpserver-uat-edi
 ```
 
 ---
@@ -164,9 +164,9 @@ curl -X POST -F "file=@orders.xml" https://sftpserver-uat-edi-6bdcffe140e3.herok
 
 ## Monitoring
 
-- **Heroku Metrics**: Dashboard → sftpserver-edi → Metrics
-- **Logs**: `heroku logs --tail -a sftpserver-edi`
-- **Status**: `heroku ps -a sftpserver-edi`
+- **Heroku Metrics**: Dashboard → sftpserver-uat-edi → Metrics
+- **Logs**: `heroku logs --tail -a sftpserver-uat-edi`
+- **Status**: `heroku ps -a sftpserver-uat-edi`
 
 ---
 
