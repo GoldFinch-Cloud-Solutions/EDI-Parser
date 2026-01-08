@@ -13,6 +13,45 @@ Quick setup instructions for the EDI Parser API.
 
 ---
 
+## Architecture Flow Diagram
+
+```mermaid
+flowchart TD
+    A[Client Request] --> B{Request Type}
+    B -->|GET ?action=listSftp| C[Connect to SFTP Server]
+    B -->|GET ?action=parseSftp| C
+    B -->|GET ?action=downloadSftp| C
+    B -->|POST file upload| G[Upload XML File]
+    B -->|GET ?action=list| H[Scan Local Directory]
+
+    C --> D[Authenticate via cURL/phpseclib]
+    D --> E[List/Download XML Files]
+    E --> F[Parse XML Content]
+
+    G --> F
+    H --> I[List Local Files]
+    I --> F
+
+    F --> J[Extract Order Data]
+    J --> K[Group by Order ID]
+    K --> L[Structure Line Items]
+    L --> M[Return JSON Response]
+
+    style C fill:#e1f5ff
+    style F fill:#fff4e1
+    style M fill:#e8f5e9
+```
+
+**Flow Description:**
+
+1. **Client Request** → API receives GET/POST request
+2. **SFTP Connection** → Connect using cURL (libssh2) or phpseclib
+3. **XML Parsing** → Parse Microsoft Excel SpreadsheetML format
+4. **Data Structuring** → Group orders and line items
+5. **JSON Response** → Return structured data
+
+---
+
 ## Prerequisites
 
 - PHP 7.4+ with SimpleXML and cURL extensions
