@@ -6,7 +6,7 @@ Quick setup instructions for the EDI Parser API.
 
 ## Deployment Information
 
-- **Heroku App**: `sftpserver-edi`
+- **Heroku App**: `sftpserver-uat-edi`
 - **GitHub Repository**: `GoldFinch-Cloud-Solutions/EDI-Parser`
 - **Live URL**: `https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php`
 - **Deployment**: Automatic via GitHub integration
@@ -80,7 +80,7 @@ git push origin main
 
 Or via Heroku dashboard:
 
-1. Go to `sftpserver-edi` app
+1. Go to `sftpserver-uat-edi` app
 2. Navigate to "Deploy" tab
 3. Click "Deploy Branch"
 
@@ -135,7 +135,7 @@ curl -X POST -F "file=@orders.xml" https://sftpserver-uat-edi-6bdcffe140e3.herok
 
 **Error: "Failed to connect to SFTP server"**
 
-- Verify credentials: `heroku config -a sftpserver-edi`
+- Verify credentials: `heroku config -a sftpserver-uat-edi`
 - Check SFTP server status
 
 ---
