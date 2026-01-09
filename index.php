@@ -4,14 +4,22 @@
  * 
  * Usage: 
  * GET  /parse_orders_api.php?file=wc-orders.xml          (Parse single file)
+ * GET  /parse_orders_api.php?file=wc-orders.xml&format=flat  (Parse single file - flat format for Salesforce)
  * GET  /parse_orders_api.php?action=list                 (List all XML files from local/SFTP)
  * GET  /parse_orders_api.php?action=parseAll             (Parse all XML files from local/SFTP)
+ * GET  /parse_orders_api.php?action=parseAll&format=flat (Parse all - flat format for Salesforce)
  * GET  /parse_orders_api.php?action=listSftp             (List files on SFTP server)
  * GET  /parse_orders_api.php?action=downloadSftp         (Download all files from SFTP)
  * GET  /parse_orders_api.php?action=parseSftp            (Download and parse all files from SFTP)
+ * GET  /parse_orders_api.php?action=parseSftp&format=flat (Download and parse from SFTP - flat format for Salesforce)
  * POST /parse_orders_api.php (with single file upload)
  * POST /parse_orders_api.php (with multiple files upload using field name "files[]")
  * POST /parse_orders_api.php (with XML content in body)
+ * 
+ * Flat Format:
+ * Add &format=flat to any parse endpoint to get flattened records suitable for Salesforce staging table.
+ * Each line item becomes a separate record with all order, address, and terms data included.
+ * Each record includes an 'externalId' field (DocumentId-LineNo) for Salesforce batch upsert operations.
  */
 
 header('Content-Type: application/json');
@@ -629,8 +637,9 @@ class OrderXMLParser {
                 ];
             }
             
-            // Add line item details
+            // Add line item details with externalId for Salesforce upsert
             $orderGroups[$orderId]['lineItems'][] = [
+                'externalId' => $lineItem['DocumentID'] . '-' . $lineItem['CustomerLine'],
                 'lineNo' => $lineItem['CustomerLine'],
                 'vendorItemNo' => $lineItem['VendorItemNo'],
                 'upcCode' => $lineItem['UPCCode'],
@@ -692,6 +701,103 @@ function getAllXMLFiles($directory) {
     }
     
     return $xmlFiles;
+}
+
+/**
+ * Flatten orders for Salesforce staging table (one record per line item)
+ */
+function flattenOrdersForSalesforce($orders) {
+    $flatRecords = [];
+    
+    foreach ($orders as $order) {
+        foreach ($order['lineItems'] as $lineItem) {
+            // Create a flat record combining order, addresses, terms, and line item data
+            $flatRecords[] = [
+                // External ID for Salesforce upsert
+                'externalId' => $order['documentId'] . '-' . $lineItem['lineNo'],
+                
+                // Order Header
+                'documentId' => $order['documentId'],
+                'companyCode' => $order['companyCode'],
+                'customerNo' => $order['customerNo'],
+                'poNumber' => $order['poNumber'],
+                'vendorNo' => $order['vendorNo'],
+                'poDate' => $order['poDate'],
+                'shipDateOrder' => $order['shipDateOrder'],
+                'cancelDate' => $order['cancelDate'],
+                'orderAmount' => $order['orderAmount'],
+                'orderCases' => $order['orderCases'],
+                'orderWeight' => $order['orderWeight'],
+                'methodOfPayment' => $order['methodOfPayment'],
+                
+                // Bill-To Address
+                'billToStoreNumber' => $order['billTo']['storeNumber'],
+                'billToCompanyName1' => $order['billTo']['companyName1'],
+                'billToCompanyName2' => $order['billTo']['companyName2'],
+                'billToAddress1' => $order['billTo']['address1'],
+                'billToAddress2' => $order['billTo']['address2'],
+                'billToAddress3' => $order['billTo']['address3'],
+                'billToCity' => $order['billTo']['city'],
+                'billToState' => $order['billTo']['state'],
+                'billToZip' => $order['billTo']['zip'],
+                'billToCountry' => $order['billTo']['country'],
+                
+                // Ship-To Address
+                'shipToStoreNumber' => $order['shipTo']['storeNumber'],
+                'shipToCompanyName1' => $order['shipTo']['companyName1'],
+                'shipToCompanyName2' => $order['shipTo']['companyName2'],
+                'shipToAddress1' => $order['shipTo']['address1'],
+                'shipToAddress2' => $order['shipTo']['address2'],
+                'shipToAddress3' => $order['shipTo']['address3'],
+                'shipToCity' => $order['shipTo']['city'],
+                'shipToState' => $order['shipTo']['state'],
+                'shipToZip' => $order['shipTo']['zip'],
+                'shipToCountry' => $order['shipTo']['country'],
+                
+                // Ship-From Address
+                'shipFromCompanyName1' => $order['shipFrom']['companyName1'],
+                'shipFromCompanyName2' => $order['shipFrom']['companyName2'],
+                'shipFromAddress1' => $order['shipFrom']['address1'],
+                'shipFromCity' => $order['shipFrom']['city'],
+                'shipFromState' => $order['shipFrom']['state'],
+                'shipFromZip' => $order['shipFrom']['zip'],
+                'shipFromCountry' => $order['shipFrom']['country'],
+                
+                // Terms
+                'termsType' => $order['terms']['type'],
+                'termsBasis' => $order['terms']['basis'],
+                'dueDays' => $order['terms']['dueDays'],
+                'netDays' => $order['terms']['netDays'],
+                'discountPercent' => $order['terms']['discountPercent'],
+                
+                // Line Item Details
+                'lineNo' => $lineItem['lineNo'],
+                'vendorItemNo' => $lineItem['vendorItemNo'],
+                'upcCode' => $lineItem['upcCode'],
+                'customerItem' => $lineItem['customerItem'],
+                'quantityOrdered' => $lineItem['quantityOrdered'],
+                'unitMeasure' => $lineItem['unitMeasure'],
+                'unitPrice' => $lineItem['unitPrice'],
+                'originalPrice' => $lineItem['originalPrice'],
+                'sellingPrice' => $lineItem['sellingPrice'],
+                'lineTotal' => $lineItem['lineTotal'],
+                'packSize' => $lineItem['packSize'],
+                'itemDesc' => $lineItem['itemDesc'],
+                'itemDesc2' => $lineItem['itemDesc2'],
+                'gtin' => $lineItem['gtin'],
+                'sku' => $lineItem['sku'],
+                'upcCaseCode' => $lineItem['upcCaseCode'],
+                'countryOfOrigin' => $lineItem['countryOfOrigin'],
+                'shipDateDetail' => $lineItem['shipDateDetail'],
+                
+                // Source Information
+                'sourceFile' => $order['sourceFile'] ?? null,
+                'sourceType' => $order['sourceType'] ?? 'local'
+            ];
+        }
+    }
+    
+    return $flatRecords;
 }
 
 /**
@@ -778,6 +884,13 @@ try {
         elseif (isset($_GET['action']) && $_GET['action'] === 'parseSftp') {
             $downloadLocal = isset($_GET['download']) && $_GET['download'] === 'true';
             $result = parseSFTPFiles($SFTP_CONFIG, $parser, $downloadLocal, $directory);
+            
+            // Flatten for Salesforce staging table if requested
+            if (isset($_GET['format']) && $_GET['format'] === 'flat') {
+                $result['records'] = flattenOrdersForSalesforce($result['orders']);
+                $result['totalRecords'] = count($result['records']);
+                unset($result['orders']); // Remove nested structure
+            }
         }
         // List all XML files locally
         elseif (isset($_GET['action']) && $_GET['action'] === 'list') {
@@ -793,6 +906,13 @@ try {
         // Parse all XML files locally
         elseif (isset($_GET['action']) && $_GET['action'] === 'parseAll') {
             $result = parseAllFiles($directory, $parser);
+            
+            // Flatten for Salesforce staging table if requested
+            if (isset($_GET['format']) && $_GET['format'] === 'flat') {
+                $result['records'] = flattenOrdersForSalesforce($result['orders']);
+                $result['totalRecords'] = count($result['records']);
+                unset($result['orders']); // Remove nested structure
+            }
         }
         // Parse single file
         else {
@@ -800,6 +920,13 @@ try {
             $filePath = $directory . '/' . basename($fileName); // Security: prevent directory traversal
             
             $result = $parser->parseFile($filePath);
+            
+            // Flatten for Salesforce staging table if requested
+            if (isset($_GET['format']) && $_GET['format'] === 'flat') {
+                $result['records'] = flattenOrdersForSalesforce($result['orders']);
+                $result['totalRecords'] = count($result['records']);
+                unset($result['orders']); // Remove nested structure
+            }
         }
         
     } elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -875,4 +1002,3 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
-
