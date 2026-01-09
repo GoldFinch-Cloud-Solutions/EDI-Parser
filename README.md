@@ -17,12 +17,10 @@ Quick setup instructions for the EDI Parser API.
 
 ```mermaid
 flowchart TD
-    A[Client Request] --> B{Request Type}
-    B -->|GET ?action=listSftp| C[Connect to SFTP Server]
-    B -->|GET ?action=parseSftp| C
-    B -->|GET ?action=downloadSftp| C
+    A[Salesforce Scheduler/API] --> B{Request Type}
+    B -->|GET ?action=parseSftp&format=flat| C[Connect to SFTP Server]
+    B -->|GET ?action=parseAll&format=flat| H[Scan Local Directory]
     B -->|POST file upload| G[Upload XML File]
-    B -->|GET ?action=list| H[Scan Local Directory]
 
     C --> D[Authenticate via cURL/phpseclib]
     D --> E[List/Download XML Files]
@@ -35,20 +33,38 @@ flowchart TD
     F --> J[Extract Order Data]
     J --> K[Group by Order ID]
     K --> L[Structure Line Items]
-    L --> M[Return JSON Response]
+    L --> M{Format Type}
+
+    M -->|format=flat| N[Flatten Data Structure]
+    M -->|default| O[Nested Structure]
+
+    N --> P[Add External ID]
+    P --> Q[Combine Order + Address + Line Item]
+    Q --> R[Return Flat JSON]
+
+    O --> S[Return Nested JSON]
+
+    R --> T[Salesforce Batch Upsert]
+    T --> U[EDI_Order_Staging__c]
+
+    S --> V[Custom Processing]
 
     style C fill:#e1f5ff
     style F fill:#fff4e1
-    style M fill:#e8f5e9
+    style N fill:#ffe1f5
+    style T fill:#e8f5e9
+    style U fill:#e8f5e9
 ```
 
 **Flow Description:**
 
-1. **Client Request** → API receives GET/POST request
+1. **Salesforce Request** → Scheduled job or API calls PHP endpoint
 2. **SFTP Connection** → Connect using cURL (libssh2) or phpseclib
 3. **XML Parsing** → Parse Microsoft Excel SpreadsheetML format
 4. **Data Structuring** → Group orders and line items
-5. **JSON Response** → Return structured data
+5. **Format Selection** → Flat format for Salesforce or nested for custom use
+6. **External ID Generation** → Create unique ID (DocumentId-LineNo)
+7. **Salesforce Upsert** → Batch upsert to staging table using External ID
 
 ---
 
@@ -129,14 +145,31 @@ Or via Heroku dashboard:
 
 **Base URL**: `https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php`
 
-| Endpoint               | Description                   |
-| ---------------------- | ----------------------------- |
-| `?action=listSftp`     | List XML files on SFTP server |
-| `?action=parseSftp`    | Parse all files from SFTP     |
-| `?action=downloadSftp` | Download files from SFTP      |
-| `?action=list`         | List local XML files          |
-| `?action=parseAll`     | Parse all local files         |
-| `?file=filename.xml`   | Parse single file             |
+### Standard Endpoints
+
+| Endpoint               | Description                               |
+| ---------------------- | ----------------------------------------- |
+| `?action=listSftp`     | List XML files on SFTP server             |
+| `?action=parseSftp`    | Parse all files from SFTP (nested format) |
+| `?action=downloadSftp` | Download files from SFTP                  |
+| `?action=list`         | List local XML files                      |
+| `?action=parseAll`     | Parse all local files (nested format)     |
+| `?file=filename.xml`   | Parse single file (nested format)         |
+
+### Salesforce Integration Endpoints
+
+| Endpoint                         | Description                                    |
+| -------------------------------- | ---------------------------------------------- |
+| `?action=parseSftp&format=flat`  | Parse SFTP files - flat format for Salesforce  |
+| `?action=parseAll&format=flat`   | Parse local files - flat format for Salesforce |
+| `?file=filename.xml&format=flat` | Parse single file - flat format for Salesforce |
+
+**Flat Format Features:**
+
+- One record per line item (no nested structure)
+- External ID field: `externalId` (DocumentId-LineNo)
+- All order, address, terms, and line item data in single record
+- Optimized for Salesforce batch upsert operations
 
 ---
 
@@ -148,16 +181,164 @@ Or via Heroku dashboard:
 curl https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php?action=listSftp
 ```
 
-### Test File Parsing
+### Test File Parsing (Nested Format)
 
 ```bash
 curl https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php?action=parseSftp
+```
+
+### Test File Parsing (Flat Format for Salesforce)
+
+```bash
+curl https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php?action=parseSftp&format=flat
 ```
 
 ### Test with POST
 
 ```bash
 curl -X POST -F "file=@orders.xml" https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php
+```
+
+### Test from Salesforce (Anonymous Apex)
+
+```apex
+HttpRequest req = new HttpRequest();
+req.setEndpoint('https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php?action=parseSftp&format=flat');
+req.setMethod('GET');
+req.setTimeout(120000);
+
+Http http = new Http();
+HttpResponse res = http.send(req);
+System.debug('Response: ' + res.getBody());
+```
+
+---
+
+## Salesforce Integration
+
+### Setup Requirements
+
+1. **Deploy Salesforce Components** (in `/salesforce` directory):
+
+   - `EDI_Order_Staging__c.object` - Custom object for staging
+   - `EDIOrderAPIService.cls` - Main service class
+   - `EDIOrderBatchProcessor.cls` - Batch processing for large data
+   - `EDIOrderQueueable.cls` - Queueable for async processing
+   - `EDIOrderScheduler.cls` - Scheduled automation
+   - `EDIOrderAPIServiceTest.cls` - Test coverage
+
+2. **Configure Remote Site Settings**:
+
+   - Navigate to: Setup → Security → Remote Site Settings
+   - Add: `https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com`
+
+3. **Update API Endpoint in Apex**:
+   ```apex
+   // In EDIOrderAPIService.cls
+   private static final String API_ENDPOINT =
+       'https://sftpserver-uat-edi-6bdcffe140e3.herokuapp.com/index.php';
+   ```
+
+### Usage Examples
+
+#### Manual Import (Small Dataset < 200 records)
+
+```apex
+EDIOrderAPIService.EDIOrderResponse response =
+    EDIOrderAPIService.fetchAndProcessOrders('parseSftp', true);
+System.debug('Imported: ' + response.totalRecords + ' records');
+```
+
+#### Async Import (200-2,000 records)
+
+```apex
+EDIOrderAPIService.fetchAndProcessOrdersAsync('parseSftp');
+```
+
+#### Scheduled Daily Import
+
+```apex
+// Schedule to run daily at 2 AM
+String jobId = EDIOrderScheduler.scheduleDaily();
+System.debug('Scheduled Job ID: ' + jobId);
+```
+
+#### Large Dataset (2,000+ records)
+
+```apex
+// Automatically routes to Batch Apex
+EDIOrderAPIService.fetchAndProcessOrdersQueueable();
+```
+
+### Data Flow
+
+1. **API Call** → Salesforce calls PHP API with `format=flat`
+2. **Flat Response** → API returns flattened records with `externalId`
+3. **Batch Upsert** → Salesforce upserts to `EDI_Order_Staging__c`
+4. **External ID Match** → Updates existing records, inserts new ones
+5. **Processing** → Custom logic processes staging records
+
+### Response Format
+
+**Nested Format** (default):
+
+```json
+{
+  "orders": [
+    {
+      "documentId": "76916821",
+      "poNumber": "044846217",
+      "billTo": { ... },
+      "shipTo": { ... },
+      "lineItems": [ ... ]
+    }
+  ]
+}
+```
+
+**Flat Format** (`format=flat`):
+
+```json
+{
+  "records": [
+    {
+      "externalId": "76916821-0001",
+      "documentId": "76916821",
+      "poNumber": "044846217",
+      "billToCompanyName1": "United Natural Foods",
+      "shipToCompanyName1": "UNFI - Moreno Valley",
+      "lineNo": "0001",
+      "vendorItemNo": "1037",
+      "quantityOrdered": 32,
+      "unitPrice": 28.8
+      // ... all fields in one flat record
+    }
+  ]
+}
+```
+
+### Monitoring
+
+#### Check Batch Job Status
+
+```apex
+List<AsyncApexJob> jobs = [
+    SELECT Status, NumberOfErrors, JobItemsProcessed, TotalJobItems
+    FROM AsyncApexJob
+    WHERE ApexClass.Name = 'EDIOrderBatchProcessor'
+    ORDER BY CreatedDate DESC LIMIT 1
+];
+```
+
+#### Query Staging Records
+
+```apex
+List<EDI_Order_Staging__c> records = [
+    SELECT External_ID__c, Processing_Status__c, Error_Message__c
+    FROM EDI_Order_Staging__c
+    WHERE CreatedDate = TODAY
+    ORDER BY CreatedDate DESC
+];
 ```
 
 ---
