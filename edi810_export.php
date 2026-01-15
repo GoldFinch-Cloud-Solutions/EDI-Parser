@@ -1,10 +1,8 @@
 <?php
 /**
- * EDI 810 Invoice Export Middleware
- * Receives JSON from Salesforce and converts to XML format
- * 
- * Usage: POST /edi810_export.php
- * Body: JSON array of invoices
+ * EDI 810 Invoice Export - Lingo XML Format
+ * Receives JSON from Salesforce and saves XML to SFTP server
+ * Uses native PHP functions - no external dependencies
  */
 
 header('Content-Type: application/json');
@@ -12,23 +10,27 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
-// Handle OPTIONS request for CORS
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
 // Configuration
-$OUTPUT_DIR = __DIR__ . '/EDI810_Invoices';
+$COMPANY_CODE = 'SIL02';  // Production company code
 $LOG_FILE = __DIR__ . '/edi810_export.log';
 
-// Ensure output directory exists
-if (!is_dir($OUTPUT_DIR)) {
-    mkdir($OUTPUT_DIR, 0755, true);
-}
+// SFTP Configuration (same as EDI 850)
+$SFTP_HOST = 'virginia.sftptogo.com';
+$SFTP_PORT = 2200;  // SFTP port
+$SFTP_USERNAME = 'def00441166779c394b1ebf405d60a';
+$SFTP_PASSWORD = '7Ivut003QohHdnzxzsPzKbkTbGGWHj';
+$SFTP_REMOTE_DIR = '/EDI810_Invoices';
+
+// Local fallback directory
+$LOCAL_OUTPUT_DIR = __DIR__ . '/EDI810_Invoices';
 
 /**
- * Log message to file
+ * Log message
  */
 function logMessage($message) {
     global $LOG_FILE;
@@ -37,105 +39,161 @@ function logMessage($message) {
 }
 
 /**
- * Convert JSON invoice to Excel XML format
+ * Convert JSON invoices to Lingo XML format (matches client sample exactly)
  */
-function convertToXML($invoices) {
-    $xml = '<?xml version="1.0"?>' . "\n";
-    $xml .= '<?mso-application progid="Excel.Sheet"?>' . "\n";
-    $xml .= '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"' . "\n";
-    $xml .= ' xmlns:o="urn:schemas-microsoft-com:office:office"' . "\n";
-    $xml .= ' xmlns:x="urn:schemas-microsoft-com:office:excel"' . "\n";
-    $xml .= ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"' . "\n";
-    $xml .= ' xmlns:html="http://www.w3.org/TR/REC-html40">' . "\n";
+function convertToLingoXML($invoices, $companyCode) {
+    $xml = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+    $xml .= '<File>' . "\n";
     
-    // Document Properties
-    $xml .= ' <DocumentProperties xmlns="urn:schemas-microsoft-com:office:office">' . "\n";
-    $xml .= '  <Author>EDI 810 Export System</Author>' . "\n";
-    $xml .= '  <Created>' . date('Y-m-d\TH:i:s\Z') . '</Created>' . "\n";
-    $xml .= '  <Version>16.00</Version>' . "\n";
-    $xml .= ' </DocumentProperties>' . "\n";
-    
-    // Styles
-    $xml .= ' <Styles>' . "\n";
-    $xml .= '  <Style ss:ID="Default" ss:Name="Normal">' . "\n";
-    $xml .= '   <Alignment ss:Vertical="Bottom"/>' . "\n";
-    $xml .= '   <Borders/>' . "\n";
-    $xml .= '   <Font ss:FontName="Calibri" ss:Size="11" ss:Color="#000000"/>' . "\n";
-    $xml .= '   <Interior/>' . "\n";
-    $xml .= '   <NumberFormat/>' . "\n";
-    $xml .= '   <Protection/>' . "\n";
-    $xml .= '  </Style>' . "\n";
-    $xml .= ' </Styles>' . "\n";
-    
-    // Worksheet
-    $xml .= ' <Worksheet ss:Name="EDI-810-Invoices">' . "\n";
-    
-    // Calculate total rows
-    $totalRows = 1; // Header row
     foreach ($invoices as $invoice) {
-        $totalRows += count($invoice['lineItems']);
-    }
-    
-    $xml .= '  <Table ss:ExpandedColumnCount="4" ss:ExpandedRowCount="' . $totalRows . '">' . "\n";
-    
-    // Header Row
-    $xml .= '   <Row>' . "\n";
-    $xml .= '    <Cell><Data ss:Type="String">';
-    $xml .= 'InvoiceNo|InvoiceDate|DueDate|PONumber|CustomerNo|CustomerName|';
-    $xml .= 'TotalAmount|TaxAmount|PaymentTerms|';
-    $xml .= 'BillToName|BillToStreet|BillToCity|BillToState|BillToZip|BillToCountry|';
-    $xml .= 'ShipToStoreNo|ShipToName|ShipToStreet|ShipToCity|ShipToState|ShipToZip|ShipToCountry|';
-    $xml .= 'LineNo|ItemNo|Description|Quantity|UnitPrice|LineAmount|UnitOfMeasure|LineTaxAmount';
-    $xml .= '</Data></Cell>' . "\n";
-    $xml .= '   </Row>' . "\n";
-    
-    // Data Rows
-    foreach ($invoices as $invoice) {
-        foreach ($invoice['lineItems'] as $line) {
-            $xml .= '   <Row>' . "\n";
-            
-            // Build pipe-delimited data
-            $data = implode('|', [
-                $invoice['invoiceNumber'] ?? '',
-                $invoice['invoiceDate'] ?? '',
-                $invoice['dueDate'] ?? '',
-                $invoice['poNumber'] ?? '',
-                $invoice['customerNo'] ?? '',
-                xmlEscape($invoice['customerName'] ?? ''),
-                $invoice['totalAmount'] ?? '0',
-                $invoice['taxAmount'] ?? '0',
-                $invoice['paymentTerms'] ?? '',
-                xmlEscape($invoice['billTo']['name'] ?? ''),
-                xmlEscape($invoice['billTo']['street'] ?? ''),
-                xmlEscape($invoice['billTo']['city'] ?? ''),
-                $invoice['billTo']['state'] ?? '',
-                $invoice['billTo']['zip'] ?? '',
-                $invoice['billTo']['country'] ?? '',
-                $invoice['shipTo']['storeNumber'] ?? '',
-                xmlEscape($invoice['shipTo']['name'] ?? ''),
-                xmlEscape($invoice['shipTo']['street'] ?? ''),
-                xmlEscape($invoice['shipTo']['city'] ?? ''),
-                $invoice['shipTo']['state'] ?? '',
-                $invoice['shipTo']['zip'] ?? '',
-                $invoice['shipTo']['country'] ?? '',
-                $line['lineNo'] ?? '',
-                $line['itemNo'] ?? '',
-                xmlEscape($line['description'] ?? ''),
-                $line['quantity'] ?? '0',
-                $line['unitPrice'] ?? '0',
-                $line['lineAmount'] ?? '0',
-                $line['unitOfMeasure'] ?? '',
-                $line['taxAmount'] ?? '0'
-            ]);
-            
-            $xml .= '    <Cell><Data ss:Type="String">' . $data . '</Data></Cell>' . "\n";
-            $xml .= '   </Row>' . "\n";
+        $xml .= '  <Document>' . "\n";
+        
+        // Document Metadata
+        $xml .= '    <CompanyCode>' . xmlEscape($companyCode) . '</CompanyCode>' . "\n";
+        $xml .= '    <CustomerNumber>' . xmlEscape($invoice['customerNo'] ?? '') . '</CustomerNumber>' . "\n";
+        $xml .= '    <Direction>Outbound</Direction>' . "\n";
+        $xml .= '    <DocumentType>810</DocumentType>' . "\n";
+        $xml .= '    <Footprint>INV</Footprint>' . "\n";
+        $xml .= '    <Version>3.0</Version>' . "\n";
+        $xml .= '    <PurchaseOrderNumber>' . xmlEscape($invoice['poNumber'] ?? '') . '</PurchaseOrderNumber>' . "\n";
+        $xml .= '    <InvoiceNumber>' . xmlEscape($invoice['invoiceNumber'] ?? '') . '</InvoiceNumber>' . "\n";
+        
+        // Header Section
+        $xml .= '    <Header>' . "\n";
+        $xml .= '      <InvoiceDate>' . formatDateForXML($invoice['invoiceDate'] ?? '') . '</InvoiceDate>' . "\n";
+        
+        // Date Loops
+        $xml .= '      <DateLoop>' . "\n";
+        $xml .= '        <DateQualifier Desc="InvoiceDate">003</DateQualifier>' . "\n";
+        $xml .= '        <Date>' . formatDateForXML($invoice['invoiceDate'] ?? '') . '</Date>' . "\n";
+        $xml .= '      </DateLoop>' . "\n";
+        
+        if (!empty($invoice['dueDate'])) {
+            $xml .= '      <DateLoop>' . "\n";
+            $xml .= '        <DateQualifier Desc="DueDate">002</DateQualifier>' . "\n";
+            $xml .= '        <Date>' . formatDateForXML($invoice['dueDate']) . '</Date>' . "\n";
+            $xml .= '      </DateLoop>' . "\n";
         }
+        
+        // Calculate total quantity for cartons
+        $totalQuantity = 0;
+        foreach ($invoice['lineItems'] as $line) {
+            $totalQuantity += ($line['quantity'] ?? 0);
+        }
+        
+        // Invoice Totals
+        $xml .= '      <InvoiceTotals>' . "\n";
+        $xml .= '        <InvoiceTotalAmount>' . number_format($invoice['totalAmount'] ?? 0, 1, '.', '') . '</InvoiceTotalAmount>' . "\n";
+        $xml .= '        <MerchandiseAmount>' . number_format(($invoice['totalAmount'] ?? 0) + ($invoice['taxAmount'] ?? 0), 1, '.', '') . '</MerchandiseAmount>' . "\n";
+        $xml .= '        <AmountLessTermsDiscount>' . number_format($invoice['totalAmount'] ?? 0, 1, '.', '') . '</AmountLessTermsDiscount>' . "\n";
+        $xml .= '        <Weight><UOM><Quantity>0.0</Quantity></UOM></Weight>' . "\n";
+        $xml .= '        <Cartons><UOM><Quantity>' . $totalQuantity . '</Quantity></UOM></Cartons>' . "\n";
+        $xml .= '        <Volume><UOM><Quantity>0.0</Quantity></UOM></Volume>' . "\n";
+        $xml .= '      </InvoiceTotals>' . "\n";
+        $xml .= '      <TransactionSetPurposeCode>00</TransactionSetPurposeCode>' . "\n";
+        $xml .= '    </Header>' . "\n";
+        
+        // Bill-To Address (BT)
+        $xml .= '    <n>' . "\n";
+        $xml .= '      <BillAndShipToCode>BT</BillAndShipToCode>' . "\n";
+        if (!empty($invoice['billTo']['storeNumber'] ?? '')) {
+            $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['billTo']['storeNumber']) . '</DUNSOrLocationNumber>' . "\n";
+        }
+        $xml .= '      <CompanyName>' . xmlEscape($invoice['billTo']['name'] ?? '') . '</CompanyName>' . "\n";
+        $xml .= '      <Address>' . xmlEscape($invoice['billTo']['street'] ?? '') . '</Address>' . "\n";
+        $xml .= '      <City>' . xmlEscape($invoice['billTo']['city'] ?? '') . '</City>' . "\n";
+        $xml .= '      <State>' . xmlEscape($invoice['billTo']['state'] ?? '') . '</State>' . "\n";
+        $xml .= '      <Zip>' . xmlEscape($invoice['billTo']['zip'] ?? '') . '</Zip>' . "\n";
+        if (!empty($invoice['billTo']['country'])) {
+            $xml .= '      <Country>' . xmlEscape($invoice['billTo']['country']) . '</Country>' . "\n";
+        }
+        $xml .= '    </n>' . "\n";
+        
+        // Ship-To Address (ST)
+        $xml .= '    <n>' . "\n";
+        $xml .= '      <BillAndShipToCode>ST</BillAndShipToCode>' . "\n";
+        if (!empty($invoice['shipTo']['storeNumber'])) {
+            $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['shipTo']['storeNumber']) . '</DUNSOrLocationNumber>' . "\n";
+        }
+        $xml .= '      <CompanyName>' . xmlEscape($invoice['shipTo']['name'] ?? '') . '</CompanyName>' . "\n";
+        $xml .= '      <Address>' . xmlEscape($invoice['shipTo']['street'] ?? '') . '</Address>' . "\n";
+        $xml .= '      <City>' . xmlEscape($invoice['shipTo']['city'] ?? '') . '</City>' . "\n";
+        $xml .= '      <State>' . xmlEscape($invoice['shipTo']['state'] ?? '') . '</State>' . "\n";
+        $xml .= '      <Zip>' . xmlEscape($invoice['shipTo']['zip'] ?? '') . '</Zip>' . "\n";
+        if (!empty($invoice['shipTo']['country'])) {
+            $xml .= '      <Country>' . xmlEscape($invoice['shipTo']['country']) . '</Country>' . "\n";
+        }
+        $xml .= '    </n>' . "\n";
+        
+        // Detail Lines
+        $lineNumber = 1;
+        foreach ($invoice['lineItems'] as $line) {
+            $xml .= '    <Detail>' . "\n";
+            $xml .= '      <DetailLine>' . "\n";
+            $xml .= '        <InternalLineNumber>' . $lineNumber . '</InternalLineNumber>' . "\n";
+            $xml .= '        <CustomerLineNumber>' . str_pad($line['lineNo'] ?? $lineNumber, 4, '0', STR_PAD_LEFT) . '</CustomerLineNumber>' . "\n";
+            $xml .= '        <OriginalLineNumber>' . $lineNumber . '</OriginalLineNumber>' . "\n";
+            
+            // Item IDs (UPC code)
+            if (!empty($line['itemNo'])) {
+                $xml .= '        <ItemIDs>' . "\n";
+                $xml .= '          <IdQualifier>UP</IdQualifier>' . "\n";
+                $xml .= '          <Id>' . xmlEscape($line['itemNo']) . '</Id>' . "\n";
+                $xml .= '        </ItemIDs>' . "\n";
+            }
+            
+            // Quantities - Invoiced (QtyQualifier 39)
+            $xml .= '        <Quantities>' . "\n";
+            $xml .= '          <QtyQualifier>39</QtyQualifier>' . "\n";
+            $xml .= '          <QtyUOM>' . xmlEscape($line['unitOfMeasure'] ?? 'CA') . '</QtyUOM>' . "\n";
+            $xml .= '          <Qty>' . ($line['quantity'] ?? 0) . '</Qty>' . "\n";
+            $xml .= '        </Quantities>' . "\n";
+            
+            // Quantities - Ordered (QtyQualifier 38)
+            $xml .= '        <Quantities>' . "\n";
+            $xml .= '          <QtyQualifier>38</QtyQualifier>' . "\n";
+            $xml .= '          <QtyUOM>' . xmlEscape($line['unitOfMeasure'] ?? 'CA') . '</QtyUOM>' . "\n";
+            $xml .= '          <Qty>' . ($line['quantity'] ?? 0) . '</Qty>' . "\n";
+            $xml .= '        </Quantities>' . "\n";
+            
+            // Price/Cost
+            $xml .= '        <PriceCost>' . "\n";
+            $xml .= '          <PriceOrCost>' . number_format($line['unitPrice'] ?? 0, 2, '.', '') . '</PriceOrCost>' . "\n";
+            $xml .= '          <PriceBasicQualifier>UCP</PriceBasicQualifier>' . "\n";
+            $xml .= '        </PriceCost>' . "\n";
+            
+            // Item Description
+            if (!empty($line['description'])) {
+                $xml .= '        <ItemDescription>' . xmlEscape($line['description']) . '</ItemDescription>' . "\n";
+            }
+            
+            // Line Totals
+            $xml .= '        <LineTotals>' . "\n";
+            $xml .= '          <TotalAmount>' . number_format($line['lineAmount'] ?? 0, 1, '.', '') . '</TotalAmount>' . "\n";
+            $xml .= '          <TotalSublines>0</TotalSublines>' . "\n";
+            $xml .= '        </LineTotals>' . "\n";
+            
+            $xml .= '      </DetailLine>' . "\n";
+            $xml .= '    </Detail>' . "\n";
+            
+            $lineNumber++;
+        }
+        
+        // Payment Terms
+        if (!empty($invoice['paymentTerms'])) {
+            $xml .= '    <Term>' . "\n";
+            $xml .= '      <TermsType>01</TermsType>' . "\n";
+            $xml .= '      <TermsBasis>3</TermsBasis>' . "\n";
+            if (!empty($invoice['dueDate'])) {
+                $xml .= '      <NetDueDate>' . formatDateForXML($invoice['dueDate']) . '</NetDueDate>' . "\n";
+            }
+            $xml .= '    </Term>' . "\n";
+        }
+        
+        $xml .= '  </Document>' . "\n";
     }
     
-    $xml .= '  </Table>' . "\n";
-    $xml .= ' </Worksheet>' . "\n";
-    $xml .= '</Workbook>';
+    $xml .= '</File>';
     
     return $xml;
 }
@@ -145,17 +203,97 @@ function convertToXML($invoices) {
  */
 function xmlEscape($text) {
     if ($text === null) return '';
-    $text = str_replace('&', '&amp;', $text);
-    $text = str_replace('<', '&lt;', $text);
-    $text = str_replace('>', '&gt;', $text);
-    $text = str_replace('"', '&quot;', $text);
-    $text = str_replace("'", '&apos;', $text);
-    return $text;
+    return htmlspecialchars($text, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+}
+
+/**
+ * Format date from M/D/YYYY to YYYY-MM-DD
+ */
+function formatDateForXML($date) {
+    if (empty($date)) return date('Y-m-d');
+    
+    // Already in YYYY-MM-DD format
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        return $date;
+    }
+    
+    // Convert M/D/YYYY to YYYY-MM-DD
+    $parts = explode('/', $date);
+    if (count($parts) === 3) {
+        return sprintf('%04d-%02d-%02d', $parts[2], $parts[0], $parts[1]);
+    }
+    
+    return date('Y-m-d');
+}
+
+/**
+ * Upload file to SFTP using cURL (most compatible method)
+ */
+function uploadToSFTP($filename, $content) {
+    global $SFTP_HOST, $SFTP_PORT, $SFTP_USERNAME, $SFTP_PASSWORD, $SFTP_REMOTE_DIR;
+    
+    // Save to temporary file first
+    $tempFile = tempnam(sys_get_temp_dir(), 'edi810_');
+    file_put_contents($tempFile, $content);
+    
+    try {
+        // Build SFTP URL
+        $remoteFile = $SFTP_REMOTE_DIR . '/' . $filename;
+        $url = "sftp://{$SFTP_USERNAME}:{$SFTP_PASSWORD}@{$SFTP_HOST}:{$SFTP_PORT}{$remoteFile}";
+        
+        // Upload using cURL
+        $ch = curl_init();
+        $fp = fopen($tempFile, 'r');
+        
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_UPLOAD, 1);
+        curl_setopt($ch, CURLOPT_INFILE, $fp);
+        curl_setopt($ch, CURLOPT_INFILESIZE, filesize($tempFile));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_SFTP);
+        
+        $result = curl_exec($ch);
+        $error = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        fclose($fp);
+        curl_close($ch);
+        unlink($tempFile);
+        
+        if ($error) {
+            throw new Exception("cURL error: $error");
+        }
+        
+        return $remoteFile;
+        
+    } catch (Exception $e) {
+        unlink($tempFile);
+        throw $e;
+    }
+}
+
+/**
+ * Fallback: Save file locally if SFTP fails
+ */
+function saveLocally($filename, $content) {
+    global $LOCAL_OUTPUT_DIR;
+    
+    if (!is_dir($LOCAL_OUTPUT_DIR)) {
+        mkdir($LOCAL_OUTPUT_DIR, 0755, true);
+    }
+    
+    $filepath = $LOCAL_OUTPUT_DIR . '/' . $filename;
+    file_put_contents($filepath, $content);
+    
+    return $filepath;
 }
 
 // Main Processing
 try {
-    logMessage('EDI 810 export request received');
+    logMessage('═══════════════════════════════════════════════════════════');
+    logMessage('📥 EDI 810 Invoice Export - Lingo XML Format');
+    logMessage('Time: ' . date('Y-m-d H:i:s'));
+    logMessage('Method: ' . $_SERVER['REQUEST_METHOD']);
     
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         throw new Exception('Only POST method is allowed');
@@ -163,49 +301,57 @@ try {
     
     // Read JSON input
     $jsonInput = file_get_contents('php://input');
-    
     if (empty($jsonInput)) {
         throw new Exception('No JSON data received');
     }
     
-    logMessage('Received ' . strlen($jsonInput) . ' bytes of JSON data');
+    logMessage('Received: ' . strlen($jsonInput) . ' bytes');
     
     // Decode JSON
     $data = json_decode($jsonInput, true);
-    
     if (json_last_error() !== JSON_ERROR_NONE) {
         throw new Exception('Invalid JSON: ' . json_last_error_msg());
     }
     
     if (!isset($data['invoices']) || !is_array($data['invoices'])) {
-        throw new Exception('Invalid data structure: missing invoices array');
+        throw new Exception('Missing invoices array');
     }
     
     $invoices = $data['invoices'];
     $invoiceCount = count($invoices);
     
-    logMessage("Processing $invoiceCount invoice(s)");
-    
     if ($invoiceCount === 0) {
         throw new Exception('No invoices to process');
     }
     
-    // Convert to XML
-    $xmlContent = convertToXML($invoices);
+    logMessage("Processing $invoiceCount invoice(s)");
+    
+    // Convert to Lingo XML
+    $xmlContent = convertToLingoXML($invoices, $COMPANY_CODE);
+    $xmlSize = strlen($xmlContent);
+    logMessage("XML generated: $xmlSize bytes");
     
     // Generate filename
     $timestamp = date('YmdHis');
-    $filename = "EDI810_Export_$timestamp.xml";
-    $filepath = $OUTPUT_DIR . '/' . $filename;
+    $filename = "EDI810_Invoice_{$timestamp}.xml";
     
-    // Save XML file
-    $bytesWritten = file_put_contents($filepath, $xmlContent);
+    // Try to upload to SFTP
+    $uploadSuccess = false;
+    $remotePath = '';
     
-    if ($bytesWritten === false) {
-        throw new Exception('Failed to write XML file');
+    try {
+        logMessage("Uploading to SFTP: $filename");
+        $remotePath = uploadToSFTP($filename, $xmlContent);
+        $uploadSuccess = true;
+        logMessage("Uploaded to SFTP: $remotePath");
+    } catch (Exception $e) {
+        logMessage(" SFTP upload failed: " . $e->getMessage());
+        logMessage("Saving locally as fallback...");
+        $remotePath = saveLocally($filename, $xmlContent);
+        logMessage("Saved locally: $remotePath");
     }
     
-    logMessage("✅ Successfully created $filename ($bytesWritten bytes)");
+    logMessage('═══════════════════════════════════════════════════════════');
     
     // Success response
     http_response_code(200);
@@ -213,20 +359,26 @@ try {
         'success' => true,
         'filesCreated' => 1,
         'filename' => $filename,
-        'filepath' => $filepath,
-        'filesize' => $bytesWritten,
+        'uploadedToSFTP' => $uploadSuccess,
+        'remotePath' => $remotePath,
+        'filesize' => $xmlSize,
         'invoiceCount' => $invoiceCount,
+        'format' => 'Lingo XML (EDI 810)',
+        'companyCode' => $COMPANY_CODE,
+        'sftpHost' => $SFTP_HOST,
         'timestamp' => date('Y-m-d H:i:s')
     ], JSON_PRETTY_PRINT);
     
 } catch (Exception $e) {
-    logMessage('❌ Error: ' . $e->getMessage());  // ✅ FIXED - use dot (.)
+    $errorMsg = $e->getMessage();
+    logMessage(' Error: ' . $errorMsg);
+    logMessage('═══════════════════════════════════════════════════════════');
     
     http_response_code(400);
     echo json_encode([
         'success' => false,
-        'error' => $e->getMessage()
+        'error' => $errorMsg,
+        'timestamp' => date('Y-m-d H:i:s')
     ], JSON_PRETTY_PRINT);
 }
-
 ?>
