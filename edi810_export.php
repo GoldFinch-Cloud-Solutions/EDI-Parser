@@ -49,16 +49,11 @@ class SFTPConnection {
         $this->config = $config;
     }
     
-    /**
-     * Connect to SFTP server
-     */
     public function connect() {
-        // Try cURL first (most compatible)
         if (function_exists('curl_init') && $this->checkCurlSFTPSupport()) {
             $this->sftp = 'curl';
             return true;
         }
-        // Try native SSH2 extension
         elseif (function_exists('ssh2_connect')) {
             return $this->connectNative();
         } else {
@@ -66,9 +61,6 @@ class SFTPConnection {
         }
     }
     
-    /**
-     * Check if cURL supports SFTP protocol
-     */
     private function checkCurlSFTPSupport() {
         if (!function_exists('curl_version')) {
             return false;
@@ -77,9 +69,6 @@ class SFTPConnection {
         return in_array('sftp', $curlInfo['protocols']);
     }
     
-    /**
-     * Connect using native SSH2 extension
-     */
     private function connectNative() {
         $this->connection = ssh2_connect($this->config['host'], $this->config['port']);
         
@@ -99,9 +88,6 @@ class SFTPConnection {
         return true;
     }
     
-    /**
-     * Upload file to SFTP server
-     */
     public function uploadFile($localFile, $remoteFile) {
         if ($this->sftp === 'curl') {
             return $this->uploadFileWithCurl($localFile, $remoteFile);
@@ -110,9 +96,6 @@ class SFTPConnection {
         }
     }
     
-    /**
-     * Upload file using cURL
-     */
     private function uploadFileWithCurl($localFile, $remoteFile) {
         $encodedPath = str_replace(' ', '%20', $remoteFile);
         $url = sprintf(
@@ -135,7 +118,6 @@ class SFTPConnection {
         
         $result = curl_exec($ch);
         $error = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         
         fclose($fp);
         curl_close($ch);
@@ -147,19 +129,12 @@ class SFTPConnection {
         return true;
     }
     
-    /**
-     * Upload file using native SSH2
-     */
     private function uploadFileNative($localFile, $remoteFile) {
         return ssh2_scp_send($this->connection, $localFile, $remoteFile, 0644);
     }
     
-    /**
-     * Create remote directory
-     */
     public function createDirectory($remotePath) {
         if ($this->sftp === 'curl') {
-            // cURL doesn't need explicit directory creation
             return true;
         } else {
             $sftpPath = "ssh2.sftp://{$this->sftp}" . $remotePath;
@@ -170,9 +145,6 @@ class SFTPConnection {
         }
     }
     
-    /**
-     * Disconnect
-     */
     public function disconnect() {
         if ($this->sftp === 'curl') {
             $this->sftp = null;
@@ -200,11 +172,40 @@ function convertToLingoXML($invoices, $companyCode) {
         $xml .= '    <Footprint>INV</Footprint>' . "\n";
         $xml .= '    <Version>3.0</Version>' . "\n";
         $xml .= '    <PurchaseOrderNumber>' . xmlEscape($invoice['poNumber'] ?? '') . '</PurchaseOrderNumber>' . "\n";
+        
+        // Add PurchaseOrderSourceID if available
+        if (!empty($invoice['poSourceId'])) {
+            $xml .= '    <PurchaseOrderSourceID>' . xmlEscape($invoice['poSourceId']) . '</PurchaseOrderSourceID>' . "\n";
+        }
+        
+        // Add PurchaseOrderDate if available
+        if (!empty($invoice['poDate'])) {
+            $xml .= '    <PurchaseOrderDate>' . formatDateForXML($invoice['poDate']) . '</PurchaseOrderDate>' . "\n";
+        }
+        
+        // Add LocationNumber if available
+        if (!empty($invoice['locationNumber'])) {
+            $xml .= '    <LocationNumber>' . xmlEscape($invoice['locationNumber']) . '</LocationNumber>' . "\n";
+        }
+        
         $xml .= '    <InvoiceNumber>' . xmlEscape($invoice['invoiceNumber'] ?? '') . '</InvoiceNumber>' . "\n";
+        
+        // Add InternalOrderNumber and InternalDocumentNumber if available
+        if (!empty($invoice['internalOrderNumber'])) {
+            $xml .= '    <InternalOrderNumber>' . xmlEscape($invoice['internalOrderNumber']) . '</InternalOrderNumber>' . "\n";
+        }
+        if (!empty($invoice['internalDocumentNumber'])) {
+            $xml .= '    <InternalDocumentNumber>' . xmlEscape($invoice['internalDocumentNumber']) . '</InternalDocumentNumber>' . "\n";
+        }
         
         // Header Section
         $xml .= '    <Header>' . "\n";
         $xml .= '      <InvoiceDate>' . formatDateForXML($invoice['invoiceDate'] ?? '') . '</InvoiceDate>' . "\n";
+        
+        // Add VendorNumber if available
+        if (!empty($invoice['vendorNumber'])) {
+            $xml .= '      <VendorNumber>' . xmlEscape($invoice['vendorNumber']) . '</VendorNumber>' . "\n";
+        }
         
         // Date Loops
         $xml .= '      <DateLoop>' . "\n";
@@ -212,10 +213,33 @@ function convertToLingoXML($invoices, $companyCode) {
         $xml .= '        <Date>' . formatDateForXML($invoice['invoiceDate'] ?? '') . '</Date>' . "\n";
         $xml .= '      </DateLoop>' . "\n";
         
-        if (!empty($invoice['dueDate'])) {
+        // PurchaseOrderDate DateLoop
+        if (!empty($invoice['poDate'])) {
             $xml .= '      <DateLoop>' . "\n";
-            $xml .= '        <DateQualifier Desc="DueDate">002</DateQualifier>' . "\n";
-            $xml .= '        <Date>' . formatDateForXML($invoice['dueDate']) . '</Date>' . "\n";
+            $xml .= '        <DateQualifier Desc="PurchaseOrderDate">004</DateQualifier>' . "\n";
+            $xml .= '        <Date>' . formatDateForXML($invoice['poDate']) . '</Date>' . "\n";
+            $xml .= '      </DateLoop>' . "\n";
+        }
+        
+        // ShipDate DateLoop
+        if (!empty($invoice['shipDate'])) {
+            $xml .= '      <DateLoop>' . "\n";
+            $xml .= '        <DateQualifier Desc="ShipDate">011</DateQualifier>' . "\n";
+            $xml .= '        <Date>' . formatDateForXML($invoice['shipDate']) . '</Date>' . "\n";
+            $xml .= '      </DateLoop>' . "\n";
+        }
+        
+        // EffectiveDate DateLoop (same as invoice date typically)
+        $xml .= '      <DateLoop>' . "\n";
+        $xml .= '        <DateQualifier Desc="EffectiveDate">007</DateQualifier>' . "\n";
+        $xml .= '        <Date>' . formatDateForXML($invoice['invoiceDate'] ?? '') . '</Date>' . "\n";
+        $xml .= '      </DateLoop>' . "\n";
+        
+        // RequestedDeliveryDate DateLoop
+        if (!empty($invoice['requestedDeliveryDate'])) {
+            $xml .= '      <DateLoop>' . "\n";
+            $xml .= '        <DateQualifier Desc="RequestedDeliveryDate">074</DateQualifier>' . "\n";
+            $xml .= '        <Date>' . formatDateForXML($invoice['requestedDeliveryDate']) . '</Date>' . "\n";
             $xml .= '      </DateLoop>' . "\n";
         }
         
@@ -235,13 +259,22 @@ function convertToLingoXML($invoices, $companyCode) {
         $xml .= '        <Volume><UOM><Quantity>0.0</Quantity></UOM></Volume>' . "\n";
         $xml .= '      </InvoiceTotals>' . "\n";
         $xml .= '      <TransactionSetPurposeCode>00</TransactionSetPurposeCode>' . "\n";
+        
+        // Reference section
+        if (!empty($invoice['customerAccount'])) {
+            $xml .= '      <Reference>' . "\n";
+            $xml .= '        <RefQualifier>CUSTACCT</RefQualifier>' . "\n";
+            $xml .= '        <RefID>' . xmlEscape($invoice['customerAccount']) . '</RefID>' . "\n";
+            $xml .= '      </Reference>' . "\n";
+        }
+        
         $xml .= '    </Header>' . "\n";
         
         // Bill-To Address (BT)
-        $xml .= '    <n>' . "\n";
+        $xml .= '    <Name>' . "\n";
         $xml .= '      <BillAndShipToCode>BT</BillAndShipToCode>' . "\n";
-        if (!empty($invoice['billTo']['storeNumber'] ?? '')) {
-            $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['billTo']['storeNumber']) . '</DUNSOrLocationNumber>' . "\n";
+        if (!empty($invoice['billTo']['dunsNumber'] ?? $invoice['billTo']['storeNumber'])) {
+            $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['billTo']['dunsNumber'] ?? $invoice['billTo']['storeNumber']) . '</DUNSOrLocationNumber>' . "\n";
         }
         $xml .= '      <CompanyName>' . xmlEscape($invoice['billTo']['name'] ?? '') . '</CompanyName>' . "\n";
         $xml .= '      <Address>' . xmlEscape($invoice['billTo']['street'] ?? '') . '</Address>' . "\n";
@@ -251,13 +284,58 @@ function convertToLingoXML($invoices, $companyCode) {
         if (!empty($invoice['billTo']['country'])) {
             $xml .= '      <Country>' . xmlEscape($invoice['billTo']['country']) . '</Country>' . "\n";
         }
-        $xml .= '    </n>' . "\n";
+        $xml .= '    </Name>' . "\n";
+        
+        // Remit-To Address (RE) - if available
+        if (!empty($invoice['remitTo'])) {
+            $xml .= '    <Name>' . "\n";
+            $xml .= '      <BillAndShipToCode>RE</BillAndShipToCode>' . "\n";
+            if (!empty($invoice['remitTo']['dunsQualifier'])) {
+                $xml .= '      <DUNSQualifier>' . xmlEscape($invoice['remitTo']['dunsQualifier']) . '</DUNSQualifier>' . "\n";
+            }
+            if (!empty($invoice['remitTo']['dunsNumber'])) {
+                $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['remitTo']['dunsNumber']) . '</DUNSOrLocationNumber>' . "\n";
+            }
+            $xml .= '      <CompanyName>' . xmlEscape($invoice['remitTo']['name'] ?? '') . '</CompanyName>' . "\n";
+            if (!empty($invoice['remitTo']['street'])) {
+                $xml .= '      <Address>' . xmlEscape($invoice['remitTo']['street']) . '</Address>' . "\n";
+            }
+            $xml .= '      <City>' . xmlEscape($invoice['remitTo']['city'] ?? '') . '</City>' . "\n";
+            $xml .= '      <State>' . xmlEscape($invoice['remitTo']['state'] ?? '') . '</State>' . "\n";
+            $xml .= '      <Zip>' . xmlEscape($invoice['remitTo']['zip'] ?? '') . '</Zip>' . "\n";
+            if (!empty($invoice['remitTo']['country'])) {
+                $xml .= '      <Country>' . xmlEscape($invoice['remitTo']['country']) . '</Country>' . "\n";
+            }
+            $xml .= '    </Name>' . "\n";
+        }
+        
+        // Ship-From Address (SF) - if available
+        if (!empty($invoice['shipFrom'])) {
+            $xml .= '    <Name>' . "\n";
+            $xml .= '      <BillAndShipToCode>SF</BillAndShipToCode>' . "\n";
+            if (!empty($invoice['shipFrom']['dunsQualifier'])) {
+                $xml .= '      <DUNSQualifier>' . xmlEscape($invoice['shipFrom']['dunsQualifier']) . '</DUNSQualifier>' . "\n";
+            }
+            if (!empty($invoice['shipFrom']['dunsNumber'])) {
+                $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['shipFrom']['dunsNumber']) . '</DUNSOrLocationNumber>' . "\n";
+            }
+            if (!empty($invoice['shipFrom']['name'])) {
+                $xml .= '      <CompanyName>' . xmlEscape($invoice['shipFrom']['name']) . '</CompanyName>' . "\n";
+            }
+            $xml .= '      <City>' . xmlEscape($invoice['shipFrom']['city'] ?? '') . '</City>' . "\n";
+            $xml .= '      <State>' . xmlEscape($invoice['shipFrom']['state'] ?? '') . '</State>' . "\n";
+            $xml .= '      <Zip>' . xmlEscape($invoice['shipFrom']['zip'] ?? '') . '</Zip>' . "\n";
+            $xml .= '    </Name>' . "\n";
+        }
         
         // Ship-To Address (ST)
-        $xml .= '    <n>' . "\n";
+        $xml .= '    <Name>' . "\n";
         $xml .= '      <BillAndShipToCode>ST</BillAndShipToCode>' . "\n";
-        if (!empty($invoice['shipTo']['storeNumber'])) {
-            $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['shipTo']['storeNumber']) . '</DUNSOrLocationNumber>' . "\n";
+        if (!empty($invoice['shipTo']['dunsQualifier'])) {
+            $xml .= '      <DUNSQualifier>' . xmlEscape($invoice['shipTo']['dunsQualifier']) . '</DUNSQualifier>' . "\n";
+        }
+        if (!empty($invoice['shipTo']['storeNumber'] ?? $invoice['shipTo']['dunsNumber'])) {
+            $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['shipTo']['storeNumber'] ?? $invoice['shipTo']['dunsNumber']) . '</DUNSOrLocationNumber>' . "\n";
         }
         $xml .= '      <CompanyName>' . xmlEscape($invoice['shipTo']['name'] ?? '') . '</CompanyName>' . "\n";
         $xml .= '      <Address>' . xmlEscape($invoice['shipTo']['street'] ?? '') . '</Address>' . "\n";
@@ -267,7 +345,20 @@ function convertToLingoXML($invoices, $companyCode) {
         if (!empty($invoice['shipTo']['country'])) {
             $xml .= '      <Country>' . xmlEscape($invoice['shipTo']['country']) . '</Country>' . "\n";
         }
-        $xml .= '    </n>' . "\n";
+        $xml .= '    </Name>' . "\n";
+        
+        // Vendor Address (VN) - if available
+        if (!empty($invoice['vendor'])) {
+            $xml .= '    <Name>' . "\n";
+            $xml .= '      <BillAndShipToCode>VN</BillAndShipToCode>' . "\n";
+            if (!empty($invoice['vendor']['dunsQualifier'])) {
+                $xml .= '      <DUNSQualifier>' . xmlEscape($invoice['vendor']['dunsQualifier']) . '</DUNSQualifier>' . "\n";
+            }
+            if (!empty($invoice['vendor']['dunsNumber'])) {
+                $xml .= '      <DUNSOrLocationNumber>' . xmlEscape($invoice['vendor']['dunsNumber']) . '</DUNSOrLocationNumber>' . "\n";
+            }
+            $xml .= '    </Name>' . "\n";
+        }
         
         // Detail Lines
         $lineNumber = 1;
@@ -278,7 +369,7 @@ function convertToLingoXML($invoices, $companyCode) {
             $xml .= '        <CustomerLineNumber>' . str_pad($line['lineNo'] ?? $lineNumber, 4, '0', STR_PAD_LEFT) . '</CustomerLineNumber>' . "\n";
             $xml .= '        <OriginalLineNumber>' . $lineNumber . '</OriginalLineNumber>' . "\n";
             
-            // Item IDs
+            // Item IDs (UPC code)
             if (!empty($line['itemNo'])) {
                 $xml .= '        <ItemIDs>' . "\n";
                 $xml .= '          <IdQualifier>UP</IdQualifier>' . "\n";
@@ -286,13 +377,30 @@ function convertToLingoXML($invoices, $companyCode) {
                 $xml .= '        </ItemIDs>' . "\n";
             }
             
-            // Quantities
+            // UK - Case UPC
+            if (!empty($line['caseUPC'])) {
+                $xml .= '        <ItemIDs>' . "\n";
+                $xml .= '          <IdQualifier>UK</IdQualifier>' . "\n";
+                $xml .= '          <Id>' . xmlEscape($line['caseUPC']) . '</Id>' . "\n";
+                $xml .= '        </ItemIDs>' . "\n";
+            }
+            
+            // UA - Unit UPC
+            if (!empty($line['unitUPC'])) {
+                $xml .= '        <ItemIDs>' . "\n";
+                $xml .= '          <IdQualifier>UA</IdQualifier>' . "\n";
+                $xml .= '          <Id>' . xmlEscape($line['unitUPC']) . '</Id>' . "\n";
+                $xml .= '        </ItemIDs>' . "\n";
+            }
+            
+            // Quantities - Invoiced (QtyQualifier 39)
             $xml .= '        <Quantities>' . "\n";
             $xml .= '          <QtyQualifier>39</QtyQualifier>' . "\n";
             $xml .= '          <QtyUOM>' . xmlEscape($line['unitOfMeasure'] ?? 'CA') . '</QtyUOM>' . "\n";
             $xml .= '          <Qty>' . ($line['quantity'] ?? 0) . '</Qty>' . "\n";
             $xml .= '        </Quantities>' . "\n";
             
+            // Quantities - Ordered (QtyQualifier 38)
             $xml .= '        <Quantities>' . "\n";
             $xml .= '          <QtyQualifier>38</QtyQualifier>' . "\n";
             $xml .= '          <QtyUOM>' . xmlEscape($line['unitOfMeasure'] ?? 'CA') . '</QtyUOM>' . "\n";
@@ -305,6 +413,20 @@ function convertToLingoXML($invoices, $companyCode) {
             $xml .= '          <PriceBasicQualifier>UCP</PriceBasicQualifier>' . "\n";
             $xml .= '        </PriceCost>' . "\n";
             
+            // PackSize, Inners, etc. if available
+            if (!empty($line['packSize'])) {
+                $xml .= '        <PackSize>' . xmlEscape($line['packSize']) . '</PackSize>' . "\n";
+            }
+            if (!empty($line['inners'])) {
+                $xml .= '        <Inners>' . xmlEscape($line['inners']) . '</Inners>' . "\n";
+            }
+            if (!empty($line['eachesPerInner'])) {
+                $xml .= '        <EachesPerInner>' . xmlEscape($line['eachesPerInner']) . '</EachesPerInner>' . "\n";
+            }
+            if (!empty($line['innersPerPack'])) {
+                $xml .= '        <InnersPerPack>' . xmlEscape($line['innersPerPack']) . '</InnersPerPack>' . "\n";
+            }
+            
             // Item Description
             if (!empty($line['description'])) {
                 $xml .= '        <ItemDescription>' . xmlEscape($line['description']) . '</ItemDescription>' . "\n";
@@ -315,6 +437,24 @@ function convertToLingoXML($invoices, $companyCode) {
             $xml .= '          <TotalAmount>' . number_format($line['lineAmount'] ?? 0, 1, '.', '') . '</TotalAmount>' . "\n";
             $xml .= '          <TotalSublines>0</TotalSublines>' . "\n";
             $xml .= '        </LineTotals>' . "\n";
+            
+            // ChargeOrAllowance if available
+            if (!empty($line['chargeOrAllowance'])) {
+                $xml .= '        <ChargeOrAllowance>' . "\n";
+                $xml .= '          <SequenceNo>' . ($lineNumber - 1) . '</SequenceNo>' . "\n";
+                $xml .= '          <Indicator>A</Indicator>' . "\n";
+                $xml .= '          <SpecialServiceCode>A400</SpecialServiceCode>' . "\n";
+                $xml .= '          <TotalAmount>' . number_format($line['chargeOrAllowance']['amount'] ?? 0, 1, '.', '') . '</TotalAmount>' . "\n";
+                if (!empty($line['chargeOrAllowance']['rate'])) {
+                    $xml .= '          <Rate>' . number_format($line['chargeOrAllowance']['rate'], 4, '.', '') . '</Rate>' . "\n";
+                }
+                $xml .= '          <Quantities>' . "\n";
+                $xml .= '            <QtyUOM>' . xmlEscape($line['unitOfMeasure'] ?? 'CA') . '</QtyUOM>' . "\n";
+                $xml .= '            <Qty>' . ($line['quantity'] ?? 0) . '</Qty>' . "\n";
+                $xml .= '          </Quantities>' . "\n";
+                $xml .= '          <MethodOfHandlingCode>02</MethodOfHandlingCode>' . "\n";
+                $xml .= '        </ChargeOrAllowance>' . "\n";
+            }
             
             $xml .= '      </DetailLine>' . "\n";
             $xml .= '    </Detail>' . "\n";
@@ -329,6 +469,9 @@ function convertToLingoXML($invoices, $companyCode) {
             $xml .= '      <TermsBasis>3</TermsBasis>' . "\n";
             if (!empty($invoice['dueDate'])) {
                 $xml .= '      <NetDueDate>' . formatDateForXML($invoice['dueDate']) . '</NetDueDate>' . "\n";
+            }
+            if (!empty($invoice['netDueDays'])) {
+                $xml .= '      <NetDueDays>' . intval($invoice['netDueDays']) . '</NetDueDays>' . "\n";
             }
             $xml .= '    </Term>' . "\n";
         }
@@ -370,14 +513,13 @@ function formatDateForXML($date) {
 // Main Processing
 try {
     logMessage('═══════════════════════════════════════════════════════════');
-    logMessage('📥 EDI 810 Invoice Export - Lingo XML Format');
+    logMessage('EDI 810 Invoice Export - Lingo XML Format');
     logMessage('Time: ' . date('Y-m-d H:i:s'));
     
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         throw new Exception('Only POST method is allowed');
     }
     
-    // Read JSON input
     $jsonInput = file_get_contents('php://input');
     if (empty($jsonInput)) {
         throw new Exception('No JSON data received');
@@ -385,7 +527,6 @@ try {
     
     logMessage('Received: ' . strlen($jsonInput) . ' bytes');
     
-    // Decode JSON
     $data = json_decode($jsonInput, true);
     if (json_last_error() !== JSON_ERROR_NONE) {
         throw new Exception('Invalid JSON: ' . json_last_error_msg());
@@ -404,16 +545,13 @@ try {
     
     logMessage("Processing $invoiceCount invoice(s)");
     
-    // Convert to Lingo XML
     $xmlContent = convertToLingoXML($invoices, $COMPANY_CODE);
     $xmlSize = strlen($xmlContent);
     logMessage("XML generated: $xmlSize bytes");
     
-    // Generate filename
     $timestamp = date('YmdHis');
     $filename = "EDI810_Invoice_{$timestamp}.xml";
     
-    // Save locally first
     if (!is_dir($LOCAL_OUTPUT_DIR)) {
         mkdir($LOCAL_OUTPUT_DIR, 0755, true);
     }
@@ -421,7 +559,6 @@ try {
     file_put_contents($localPath, $xmlContent);
     logMessage("Saved locally: $localPath");
     
-    // Upload to SFTP
     $uploadSuccess = false;
     $remotePath = '';
     
@@ -431,10 +568,8 @@ try {
         $sftp->connect();
         logMessage("Connected to SFTP");
         
-        // Create remote directory if needed
         $sftp->createDirectory($SFTP_CONFIG['remote_path']);
         
-        // Upload file
         $remotePath = $SFTP_CONFIG['remote_path'] . '/' . $filename;
         logMessage("Uploading to: $remotePath");
         
@@ -446,12 +581,11 @@ try {
         
     } catch (Exception $e) {
         logMessage("SFTP upload failed: " . $e->getMessage());
-        $remotePath = $localPath; // Fallback to local path
+        $remotePath = $localPath;
     }
     
     logMessage('═══════════════════════════════════════════════════════════');
     
-    // Success response
     http_response_code(200);
     echo json_encode([
         'success' => true,
