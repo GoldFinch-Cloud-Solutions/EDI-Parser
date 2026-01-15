@@ -19,7 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 // Configuration
-$OUTPUT_DIR = __DIR__ . '/edi810_output';
+$OUTPUT_DIR = __DIR__ . '/EDI810_Invoices';
 $LOG_FILE = __DIR__ . '/edi810_export.log';
 
 // Ensure output directory exists
@@ -228,4 +228,5 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
+
 ?>
