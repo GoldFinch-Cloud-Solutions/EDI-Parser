@@ -20,13 +20,38 @@ $LOG_FILE = __DIR__ . '/edi810_export.log';
 $LOCAL_OUTPUT_DIR = __DIR__ . '/EDI810_Invoices';
 
 // SFTP Configuration
-$SFTP_CONFIG = [
-    'host' => getenv('SFTP_HOST') ?: 'virginia.sftptogo.com',
-    'port' => getenv('SFTP_PORT') ?: 22,
-    'username' => getenv('SFTP_USERNAME') ?: 'def00441166779c394b1ebf405d60a',
-    'password' => getenv('SFTP_PASSWORD') ?: '7Ivut003QohHdnzxzsPzKbkTbGGWHj',
-    'remote_path' => '/EDI810_Invoices'
-];
+// $SFTP_CONFIG = [
+//     'host' => getenv('SFTP_HOST') ?: 'virginia.sftptogo.com',
+//     'port' => getenv('SFTP_PORT') ?: 22,
+//     'username' => getenv('SFTP_USERNAME') ?: 'def00441166779c394b1ebf405d60a',
+//     'password' => getenv('SFTP_PASSWORD') ?: '7Ivut003QohHdnzxzsPzKbkTbGGWHj',
+//     'remote_path' => '/EDI810_Invoices'
+// ];
+function getSFTPConfig() {
+    $config = [
+        'host' => $_SERVER['HTTP_SFTP_HOST'] ?? getenv('SFTP_HOST'),
+        'port' => $_SERVER['HTTP_SFTP_PORT'] ?? getenv('SFTP_PORT') ?: 22,
+        'username' => $_SERVER['HTTP_USERNAME'] ?? getenv('SFTP_USERNAME'),
+        'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD'),
+        'remote_path' => '/EDI810_Invoices'
+    ];
+    
+    // Validate required fields
+    $missing = [];
+    if (empty($config['host'])) $missing[] = 'SFTP host';
+    if (empty($config['username'])) $missing[] = 'SFTP username';
+    if (empty($config['password'])) $missing[] = 'SFTP password';
+    
+    if (!empty($missing)) {
+        throw new Exception(
+            'Missing SFTP credentials: ' . implode(', ', $missing) . 
+            '. Please provide via HTTP headers or environment variables.'
+        );
+    }
+    
+    return $config;
+}
+
 
 /**
  * Log message
@@ -153,7 +178,6 @@ class SFTPConnection {
         $this->sftp = null;
     }
 }
-
 /**
  * Convert JSON invoices to Lingo XML format
  */
@@ -563,7 +587,10 @@ try {
     $remotePath = '';
     
     try {
-        logMessage("Connecting to SFTP...");
+        // Get SFTP config (will throw exception if credentials missing)
+        $SFTP_CONFIG = getSFTPConfig();
+        
+        logMessage("Connecting to SFTP: " . $SFTP_CONFIG['host']);
         $sftp = new SFTPConnection($SFTP_CONFIG);
         $sftp->connect();
         logMessage("Connected to SFTP");
@@ -598,7 +625,7 @@ try {
         'invoiceCount' => $invoiceCount,
         'format' => 'Lingo XML (EDI 810)',
         'companyCode' => $COMPANY_CODE,
-        'sftpHost' => $SFTP_CONFIG['host'],
+        'sftpHost' => isset($SFTP_CONFIG) ? $SFTP_CONFIG['host'] : 'N/A',
         'timestamp' => date('Y-m-d H:i:s')
     ], JSON_PRETTY_PRINT);
     
@@ -615,3 +642,4 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
