@@ -19,12 +19,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 // SFTP Configuration
 $SFTP_CONFIG = [
-    'host' => getenv('SFTP_HOST') ?: 'virginia.sftptogo.com',
-    'port' => getenv('SFTP_PORT') ?: 22,
-    'username' => getenv('SFTP_USERNAME') ?: 'def00441166779c394b1ebf405d60a',
-    'password' => getenv('SFTP_PASSWORD') ?: '7Ivut003QohHdnzxzsPzKbkTbGGWHj',
-    'remote_path' => getenv('SFTP_REMOTE_PATH') ?: '/EDI_Orders'
+    'host' => $_SERVER['HTTP_SFTP_HOST'] ?? getenv('SFTP_HOST'),
+    'port' => $_SERVER['HTTP_SFTP_PORT'] ?? getenv('SFTP_PORT') ?: 22,
+    'username' => $_SERVER['HTTP_USERNAME'] ?? getenv('SFTP_USERNAME'),
+    'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD'),
+    'remote_path' => getenv('SFTP_REMOTE_PATH') ?: '/EDI850_Orders'
 ];
+
+//$SFTP_CONFIG = [
+//    'host' => getenv('SFTP_HOST') ?: 'virginia.sftptogo.com',
+//    'port' => getenv('SFTP_PORT') ?: 22,
+//    'username' => getenv('SFTP_USERNAME') ?: 'def00441166779c394b1ebf405d60a',
+//    'password' => getenv('SFTP_PASSWORD') ?: '7Ivut003QohHdnzxzsPzKbkTbGGWHj',
+//    'remote_path' => getenv('SFTP_REMOTE_PATH') ?: '/EDI_Orders'
+//];
 
 /**
  * SFTP Connection Class
@@ -810,3 +818,4 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
