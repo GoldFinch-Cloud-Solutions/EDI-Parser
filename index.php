@@ -216,6 +216,83 @@ class SFTPConnection {
         if ($error) throw new Exception("SFTP cURL Error: $error");
         return $content;
     }
+
+    public function uploadFile($localFile, $remoteFile) {
+        if ($this->sftp === 'curl') {
+            return $this->uploadFileWithCurl($localFile, $remoteFile);
+        } else {
+            $stream = fopen("ssh2.sftp://{$this->sftp}" . $remoteFile, 'w');
+            if (!$stream) {
+                throw new Exception("Failed to open remote file for writing: $remoteFile");
+            }
+            
+            $data = file_get_contents($localFile);
+            if (fwrite($stream, $data) === false) {
+                throw new Exception("Failed to write to remote file: $remoteFile");
+            }
+            
+            fclose($stream);
+            return true;
+        }
+    }
+    
+    private function uploadFileWithCurl($localFile, $remoteFile) {
+        $encodedPath = str_replace(' ', '%20', $remoteFile);
+        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
+        
+        $fp = fopen($localFile, 'r');
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+        curl_setopt($ch, CURLOPT_UPLOAD, true);
+        curl_setopt($ch, CURLOPT_INFILE, $fp);
+        curl_setopt($ch, CURLOPT_INFILESIZE, filesize($localFile));
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        
+        $result = curl_exec($ch);
+        $error = curl_error($ch);
+        
+        fclose($fp);
+        curl_close($ch);
+        
+        if ($error) {
+            throw new Exception("SFTP cURL Upload Error: $error");
+        }
+        
+        return true;
+    }
+
+    public function deleteFile($remoteFile) {
+        if ($this->sftp === 'curl') {
+            return $this->deleteFileWithCurl($remoteFile);
+        } else {
+            return ssh2_sftp_unlink($this->sftp, $remoteFile);
+        }
+    }
+    
+    private function deleteFileWithCurl($remoteFile) {
+        $encodedPath = str_replace(' ', '%20', $remoteFile);
+        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+        curl_setopt($ch, CURLOPT_QUOTE, array('rm ' . $remoteFile));
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        
+        $result = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($error) {
+            throw new Exception("SFTP cURL Delete Error: $error");
+        }
+        
+        return true;
+    }
     
     public function disconnect() {
         if ($this->sftp === 'curl') {
@@ -874,6 +951,7 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
 
 
 
