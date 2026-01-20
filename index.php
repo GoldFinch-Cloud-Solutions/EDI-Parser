@@ -791,7 +791,6 @@ function parseSFTPFiles($config, $parser) {
     $filesProcessed = 0;
     $fileErrors = [];
     $formats = [];
-    $fileContents = []; // ✅ ADD THIS - Store raw XML
     
     foreach ($files as $fileInfo) {
         try {
@@ -799,13 +798,6 @@ function parseSFTPFiles($config, $parser) {
             $result = $parser->parseXML($xmlContent);
             
             $formats[] = $result['format'];
-            
-            // ✅ Store raw XML content with filename
-            $fileContents[] = [
-                'filename' => $fileInfo['filename'],
-                'content' => $xmlContent, // Raw XML string
-                'size' => strlen($xmlContent)
-            ];
             
             foreach ($result['orders'] as $order) {
                 $order['sourceFile'] = $fileInfo['filename'];
@@ -842,7 +834,6 @@ function parseSFTPFiles($config, $parser) {
         'totalLineItems' => $totalLineItems,
         'fileErrors' => $fileErrors,
         'orders' => $allOrders,
-        'fileContents' => $fileContents // ✅ ADD THIS
     ];
 }
 
@@ -883,5 +874,6 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
 
 
