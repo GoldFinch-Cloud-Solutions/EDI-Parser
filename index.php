@@ -868,25 +868,72 @@ function parseSFTPFiles($config, $parser) {
     $filesProcessed = 0;
     $fileErrors = [];
     $formats = [];
+    $movedFiles = [];
+    $archiveErrors = [];
     
     foreach ($files as $fileInfo) {
+        $fileName = $fileInfo['filename'];
+        
         try {
+            // STEP 1: Read and parse the file
             $xmlContent = $sftp->getFileContent($fileInfo['path']);
             $result = $parser->parseXML($xmlContent);
             
             $formats[] = $result['format'];
             
             foreach ($result['orders'] as $order) {
-                $order['sourceFile'] = $fileInfo['filename'];
+                $order['sourceFile'] = $fileName;
                 $order['sourceType'] = 'sftp';
                 $order['sourceFormat'] = $result['format'];
                 $allOrders[] = $order;
             }
             
             $filesProcessed++;
+            
+            // STEP 2: Move to /Archived IMMEDIATELY after successful parsing
+            try {
+                $sourcePath = $config['remote_path'];
+                $archivePath = '/Archived';
+                
+                $sourceFile = rtrim($sourcePath, '/') . '/' . $fileName;
+                $destFile = rtrim($archivePath, '/') . '/' . $fileName;
+                
+                $archived = false;
+                
+                // Method 1: Try native SSH2 rename (fastest)
+                if ($sftp->sftp !== 'curl') {
+                    try {
+                        $renamed = ssh2_sftp_rename($sftp->sftp, $sourceFile, $destFile);
+                        if ($renamed) {
+                            $movedFiles[] = $fileName;
+                            $archived = true;
+                        }
+                    } catch (Exception $e) {
+                        // Rename failed, will try copy+delete fallback
+                    }
+                }
+                
+                // Method 2: Copy + Delete (fallback if rename failed or using cURL)
+                if (!$archived) {
+                    $tempFile = sys_get_temp_dir() . '/' . $fileName;
+                    file_put_contents($tempFile, $xmlContent); // Use already-read content
+                    
+                    $sftp->uploadFile($tempFile, $destFile);
+                    $sftp->deleteFile($sourceFile);
+                    
+                    unlink($tempFile);
+                    $movedFiles[] = $fileName;
+                }
+                
+            } catch (Exception $e) {
+                // Archive failed, but parsing succeeded - log it
+                $archiveErrors[] = "$fileName: " . $e->getMessage();
+                // Don't throw - we still want to return the parsed orders
+            }
+            
         } catch (Exception $e) {
             $fileErrors[] = [
-                'file' => $fileInfo['filename'],
+                'file' => $fileName,
                 'error' => $e->getMessage()
             ];
         }
@@ -910,6 +957,9 @@ function parseSFTPFiles($config, $parser) {
         'totalOrders' => count($allOrders),
         'totalLineItems' => $totalLineItems,
         'fileErrors' => $fileErrors,
+        'filesArchived' => count($movedFiles),
+        'archivedFiles' => $movedFiles,
+        'archiveErrors' => $archiveErrors,
         'orders' => $allOrders,
     ];
 }
@@ -951,6 +1001,7 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
 
 
 
