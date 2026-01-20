@@ -26,6 +26,62 @@ $SFTP_CONFIG = [
     'remote_path' => getenv('SFTP_REMOTE_PATH') ?: '/EDI850_Orders'
 ];
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    // Check if this is a move-files request
+    if (isset($input['sourcePath']) && isset($input['destinationPath'])) {
+        $SFTP_CONFIG = [
+            'host' => $_SERVER['HTTP_SFTP_HOST'] ?? getenv('SFTP_HOST'),
+            'port' => $_SERVER['HTTP_SFTP_PORT'] ?? getenv('SFTP_PORT') ?: 22,
+            'username' => $_SERVER['HTTP_USERNAME'] ?? getenv('SFTP_USERNAME'),
+            'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD')
+        ];
+        
+        $sourcePath = $input['sourcePath'];
+        $destinationPath = $input['destinationPath'];
+        
+        try {
+            $sftp = new SFTPConnection($SFTP_CONFIG);
+            $sftp->connect();
+            
+            $files = $sftp->listFiles($sourcePath);
+            $movedCount = 0;
+            
+            foreach ($files as $file) {
+                $sourceFile = rtrim($sourcePath, '/') . '/' . $file['filename'];
+                $destFile = rtrim($destinationPath, '/') . '/' . $file['filename'];
+                
+                $content = $sftp->getFileContent($sourceFile);
+                
+                $tempFile = sys_get_temp_dir() . '/' . $file['filename'];
+                file_put_contents($tempFile, $content);
+                
+                $sftp->uploadFile($tempFile, $destFile);
+                $sftp->deleteFile($sourceFile);
+                
+                unlink($tempFile);
+                $movedCount++;
+            }
+            
+            $sftp->disconnect();
+            
+            http_response_code(200);
+            echo json_encode([
+                'success' => true,
+                'filesMoved' => $movedCount
+            ]);
+            
+        } catch (Exception $e) {
+            http_response_code(400);
+            echo json_encode([
+                'success' => false,
+                'error' => $e->getMessage()
+            ]);
+        }
+        exit;  // Important: exit after handling move-files
+    }
+}
 //$SFTP_CONFIG = [
 //    'host' => getenv('SFTP_HOST') ?: 'virginia.sftptogo.com',
 //    'port' => getenv('SFTP_PORT') ?: 22,
@@ -735,6 +791,7 @@ function parseSFTPFiles($config, $parser) {
     $filesProcessed = 0;
     $fileErrors = [];
     $formats = [];
+    $fileContents = []; // ✅ ADD THIS - Store raw XML
     
     foreach ($files as $fileInfo) {
         try {
@@ -742,6 +799,13 @@ function parseSFTPFiles($config, $parser) {
             $result = $parser->parseXML($xmlContent);
             
             $formats[] = $result['format'];
+            
+            // ✅ Store raw XML content with filename
+            $fileContents[] = [
+                'filename' => $fileInfo['filename'],
+                'content' => $xmlContent, // Raw XML string
+                'size' => strlen($xmlContent)
+            ];
             
             foreach ($result['orders'] as $order) {
                 $order['sourceFile'] = $fileInfo['filename'];
@@ -777,7 +841,8 @@ function parseSFTPFiles($config, $parser) {
         'totalOrders' => count($allOrders),
         'totalLineItems' => $totalLineItems,
         'fileErrors' => $fileErrors,
-        'orders' => $allOrders
+        'orders' => $allOrders,
+        'fileContents' => $fileContents // ✅ ADD THIS
     ];
 }
 
@@ -818,4 +883,5 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
 
