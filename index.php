@@ -769,7 +769,7 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
  * Called by Salesforce AFTER successful order processing
  */
 function archiveSpecificFiles($config, $fileNames) {
-    error_log("=== ARCHIVING PROCESSED FILES ===");
+    error_log("=== ARCHIVING PROCESSED FILES (MOVE OPERATION) ===");
     error_log("Files to archive: " . implode(', ', $fileNames));
     
     try {
@@ -777,7 +777,7 @@ function archiveSpecificFiles($config, $fileNames) {
         $sftp->connect();
         error_log("SFTP Connected for archiving");
     } catch (Exception $e) {
-        error_log(" SFTP Connection failed: " . $e->getMessage());
+        error_log("SFTP Connection failed: " . $e->getMessage());
         return [
             'success' => false,
             'archivedCount' => 0,
@@ -794,82 +794,43 @@ function archiveSpecificFiles($config, $fileNames) {
     $errors = [];
     
     foreach ($fileNames as $fileName) {
-        // Trim and clean file name
         $fileName = trim($fileName);
-        error_log("Archiving: $fileName");
+        error_log("Processing: $fileName");
         
         try {
             $sourceFile = rtrim($sourcePath, '/') . '/' . $fileName;
             $destFile = rtrim($archivePath, '/') . '/' . $fileName;
             
-            error_log("  Source: $sourceFile");
-            error_log("  Destination: $destFile");
+            error_log("  From: $sourceFile");
+            error_log("  To:   $destFile");
             
-            // Read file content
-            $content = $sftp->getFileContent($sourceFile);
-            error_log("  1. Read file: " . strlen($content) . " bytes");
-            
-            // Create temp file
-            $tempFile = sys_get_temp_dir() . '/' . basename($fileName);
-            $bytesWritten = file_put_contents($tempFile, $content);
-            
-            if ($bytesWritten === false || $bytesWritten === 0) {
-                throw new Exception("Failed to create temp file");
+            // Check if source file exists
+            if (!$sftp->fileExists($sourceFile)) {
+                throw new Exception("Source file not found: $sourceFile");
             }
-            error_log("  2. Created temp file: $tempFile ($bytesWritten bytes)");
+            error_log("  ✓ Source file exists");
             
-            // Upload to archived folder
-            $sftp->uploadFile($tempFile, $destFile);
-            error_log("  3. Uploaded to: $destFile");
+            // Move file (instant, atomic operation)
+            $startTime = microtime(true);
+            $sftp->moveFile($sourceFile, $destFile);
+            $elapsed = round((microtime(true) - $startTime) * 1000, 2);
             
-            // Verify upload by checking if we can read it back
-            try {
-                $verifyContent = $sftp->getFileContent($destFile);
-                if (strlen($verifyContent) !== strlen($content)) {
-                    throw new Exception("Upload verification failed - size mismatch");
-                }
-                error_log("  4. Upload verified (size matches)");
-            } catch (Exception $e) {
-                throw new Exception("Upload verification failed: " . $e->getMessage());
+            error_log("  ✓ Moved successfully in {$elapsed}ms");
+            
+            // Verify file is now in archive location
+            if ($sftp->fileExists($destFile)) {
+                error_log("  ✓ Verified in archive location");
+                $archived[] = $fileName;
+                error_log("  SUCCESSFULLY ARCHIVED: $fileName");
+            } else {
+                throw new Exception("Move completed but file not found in archive location");
             }
-            
-            // NOW delete from source (only after verified upload)
-            try {
-                $sftp->deleteFile($sourceFile);
-                error_log("  5. Deleted from source: $sourceFile");
-            } catch (Exception $deleteEx) {
-                // Log but don't fail - file is already in archive
-                error_log("   WARNING: Could not delete source file: " . $deleteEx->getMessage());
-                error_log("  ℹ File successfully archived but remains in source");
-            }
-            
-            // Clean up temp file
-            if (file_exists($tempFile)) {
-                unlink($tempFile);
-            }
-            
-            $archived[] = $fileName;
-            error_log("  SUCCESSFULLY ARCHIVED: $fileName");
             
         } catch (Exception $e) {
-            $errorDetail = [
-                'file' => $fileName,
-                'error' => $e->getMessage(),
-                'line' => $e->getLine(),
-                'trace' => $e->getTraceAsString()
-            ];
             $errors[] = "$fileName: " . $e->getMessage();
-            error_log("   ARCHIVE FAILED for $fileName: " . $e->getMessage());
-            error_log("  Error Line: " . $e->getLine());
-            error_log("  Stack Trace: " . $e->getTraceAsString());
-            
-            // Clean up temp file on error
-            if (isset($tempFile) && file_exists($tempFile)) {
-                unlink($tempFile);
-            }
-            
-            // CRITICAL: If archive fails, the file stays in source folder for retry
-            error_log("  ⚠ File remains in source folder for retry");
+            error_log("  ARCHIVE FAILED for $fileName: " . $e->getMessage());
+            error_log("     Error details: " . $e->getTraceAsString());
+            error_log("  File remains in source folder for retry");
         }
     }
     
@@ -877,8 +838,17 @@ function archiveSpecificFiles($config, $fileNames) {
     error_log("SFTP Disconnected");
     
     error_log("=== ARCHIVE COMPLETE ===");
-    error_log("Successfully archived: " . count($archived));
-    error_log("Archive errors: " . count($errors));
+    error_log("✓ Successfully archived: " . count($archived) . " files");
+    error_log("✗ Archive errors: " . count($errors) . " files");
+    if (!empty($archived)) {
+        error_log("Archived files: " . implode(', ', $archived));
+    }
+    if (!empty($errors)) {
+        error_log("Failed files:");
+        foreach ($errors as $error) {
+            error_log("  - $error");
+        }
+    }
     error_log("========================");
     
     return [
@@ -889,7 +859,6 @@ function archiveSpecificFiles($config, $fileNames) {
         'errors' => $errors
     ];
 }
-
 // ========================================
 // MAIN API LOGIC
 // ========================================
@@ -946,3 +915,4 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
