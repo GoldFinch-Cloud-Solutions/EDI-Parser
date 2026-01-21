@@ -232,19 +232,16 @@ class SFTPConnection {
         if ($this->sftp === 'curl') {
             return $this->deleteFileWithCurl($remoteFile);
         } else {
+            // Native SSH2 method
             $result = @ssh2_sftp_unlink($this->sftp, $remoteFile);
             if (!$result) {
-                try {
-                    $command = 'rm -f ' . escapeshellarg($remoteFile);
-                    $stream = @ssh2_exec($this->connection, $command);
-                    if ($stream) {
-                        stream_set_blocking($stream, true);
-                        $output = stream_get_contents($stream);
-                        fclose($stream);
-                        return true;
-                    }
-                } catch (Exception $e) {
-                    throw new Exception("Failed to delete file using SSH2: $remoteFile - " . $e->getMessage());
+                // Fallback to exec
+                $command = 'rm -f ' . escapeshellarg($remoteFile);
+                $stream = @ssh2_exec($this->connection, $command);
+                if ($stream) {
+                    stream_set_blocking($stream, true);
+                    fclose($stream);
+                    return true;
                 }
                 throw new Exception("Failed to delete file: $remoteFile");
             }
@@ -253,110 +250,50 @@ class SFTPConnection {
     }
     
     private function deleteFileWithCurl($remoteFile) {
-        error_log("   🗑️  DELETE OPERATION (cURL method)");
-        error_log("      File path: $remoteFile");
+        error_log("     DELETE via cURL SFTP");
+        error_log("      File: $remoteFile");
         
-        // CRITICAL FIX: Use a dummy file download operation to enable POSTQUOTE
-        // POSTQUOTE only executes after a successful transfer operation
-        $pathParts = explode('/', $remoteFile);
-        $encodedParts = array_map('rawurlencode', $pathParts);
-        $encodedPath = implode('/', $encodedParts);
+        $url = sprintf("sftp://%s:%d/", $this->config['host'], $this->config['port']);
         
-        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
-        
-        // Use rm command in POSTQUOTE - but we need a transfer operation first
-        $escapedPath = str_replace('"', '\\"', $remoteFile);
-        $deleteCommand = 'rm "' . $escapedPath . '"';
-        
-        error_log("      Command: $deleteCommand");
-        error_log("      URL: $url");
+        // Simple SFTP delete command
+        $deleteCommand = 'rm ' . $remoteFile;
         
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-        
-        // KEY FIX: Don't use CURLOPT_NOBODY - we need an actual transfer for POSTQUOTE to work
-        // Instead, download to memory (we'll discard it)
+        curl_setopt($ch, CURLOPT_QUOTE, array($deleteCommand)); // QUOTE, not POSTQUOTE!
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        
-        // Execute delete AFTER the download completes
-        curl_setopt($ch, CURLOPT_POSTQUOTE, array($deleteCommand));
-        
+        curl_setopt($ch, CURLOPT_NOBODY, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         
         $result = curl_exec($ch);
         $error = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        
         curl_close($ch);
         
         if ($error) {
-            error_log("      ❌ cURL Error: $error (Code: $httpCode)");
-            throw new Exception("SFTP cURL Delete Error: $error (HTTP Code: $httpCode)");
+            error_log("        Delete failed, trying rename: $error");
+            return $this->deleteFileAlternative($remoteFile);
         }
         
-        // Verify the file was actually deleted
-        try {
-            $verifyUrl = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
-            $verifyCheck = curl_init();
-            curl_setopt($verifyCheck, CURLOPT_URL, $verifyUrl);
-            curl_setopt($verifyCheck, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-            curl_setopt($verifyCheck, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($verifyCheck, CURLOPT_NOBODY, true);
-            curl_setopt($verifyCheck, CURLOPT_SSL_VERIFYPEER, false);
-            curl_setopt($verifyCheck, CURLOPT_SSL_VERIFYHOST, false);
-            
-            curl_exec($verifyCheck);
-            $verifyCode = curl_getinfo($verifyCheck, CURLINFO_RESPONSE_CODE);
-            curl_close($verifyCheck);
-            
-            // If file still exists (code 200), throw error
-            if ($verifyCode == 200 || $verifyCode == 0) {
-                error_log("      ⚠️  WARNING: File may still exist after delete (verify code: $verifyCode)");
-                error_log("      Attempting alternative delete method...");
-                
-                // Try alternative: Use PREQUOTE with rename to .deleted
-                return $this->deleteFileAlternative($remoteFile);
-            }
-            
-        } catch (Exception $e) {
-            error_log("      ℹ️  Verification check failed (expected): " . $e->getMessage());
-        }
-        
-        error_log("      ✅ Delete command executed and verified");
-        error_log("      Response code: $httpCode");
-        
+        error_log("       File deleted");
         return true;
     }
     
-    /**
-     * Alternative delete method: rename file to .deleted extension
-     * This is more reliable than rm in some SFTP implementations
-     */
     private function deleteFileAlternative($remoteFile) {
-        error_log("      🔄 Using alternative delete (rename to .deleted)");
+        error_log("      Alternative: Rename to .deleted");
         
-        $pathParts = explode('/', $remoteFile);
-        $encodedParts = array_map('rawurlencode', $pathParts);
-        $encodedPath = implode('/', $encodedParts);
-        
-        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
-        
-        // Rename to .deleted extension
+        $url = sprintf("sftp://%s:%d/", $this->config['host'], $this->config['port']);
         $deletedPath = $remoteFile . '.deleted.' . time();
-        $escapedOld = str_replace('"', '\\"', $remoteFile);
-        $escapedNew = str_replace('"', '\\"', $deletedPath);
-        $renameCommand = 'rename "' . $escapedOld . '" "' . $escapedNew . '"';
-        
-        error_log("      Rename command: $renameCommand");
+        $renameCommand = 'rename ' . $remoteFile . ' ' . $deletedPath;
         
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+        curl_setopt($ch, CURLOPT_QUOTE, array($renameCommand));
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POSTQUOTE, array($renameCommand));
+        curl_setopt($ch, CURLOPT_NOBODY, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         
@@ -365,11 +302,10 @@ class SFTPConnection {
         curl_close($ch);
         
         if ($error) {
-            error_log("      ❌ Rename failed: $error");
-            throw new Exception("Failed to delete file (both methods): $remoteFile");
+            throw new Exception("Failed to delete file (both methods): $error");
         }
         
-        error_log("      ✅ File renamed to: $deletedPath");
+        error_log("       Renamed to: $deletedPath");
         return true;
     }
     
@@ -997,3 +933,4 @@ try {
     ], JSON_PRETTY_PRINT);
 }
 ?>
+
