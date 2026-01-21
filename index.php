@@ -43,18 +43,18 @@ class SFTPConnection {
     }
     
     public function connect() {
-        error_log(" SFTP Connection Method Detection:");
+        error_log("🔌 SFTP Connection Method Detection:");
         
         if (function_exists('curl_init') && $this->checkCurlSFTPSupport()) {
             $this->sftp = 'curl';
-            error_log("   Using cURL SFTP");
+            error_log("   ✅ Using cURL SFTP");
             return true;
         }
         elseif (function_exists('ssh2_connect')) {
-            error_log("    Using Native SSH2");
+            error_log("   ✅ Using Native SSH2");
             return $this->connectNative();
         } else {
-            error_log("    No SFTP library available");
+            error_log("   ❌ No SFTP library available");
             throw new Exception("No SFTP library available");
         }
     }
