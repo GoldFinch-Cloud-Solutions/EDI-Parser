@@ -3,7 +3,7 @@
  * WooCommerce Orders XML Parser API - COMPLETE DUAL FORMAT SUPPORT
  * Supports both Excel XML and Lingo XML formats
  * 
- * Version: 3.0 - FIXED ARCHIVE LOGIC
+ * Version: 3.1 - FIXED DELETE OPERATION
  * Last Updated: January 2026
  * 
  * ENDPOINTS:
@@ -47,14 +47,14 @@ class SFTPConnection {
         
         if (function_exists('curl_init') && $this->checkCurlSFTPSupport()) {
             $this->sftp = 'curl';
-            error_log("   ✅ Using cURL SFTP");
+            error_log(" Using cURL SFTP");
             return true;
         }
         elseif (function_exists('ssh2_connect')) {
-            error_log("   ✅ Using Native SSH2");
+            error_log(" Using Native SSH2");
             return $this->connectNative();
         } else {
-            error_log("   ❌ No SFTP library available");
+            error_log(" No SFTP library available");
             throw new Exception("No SFTP library available");
         }
     }
@@ -153,7 +153,6 @@ class SFTPConnection {
     }
     
     private function getFileContentWithCurl($remoteFile) {
-        // Properly encode the path for URL, but preserve the file structure
         $pathParts = explode('/', $remoteFile);
         $encodedParts = array_map('rawurlencode', $pathParts);
         $encodedPath = implode('/', $encodedParts);
@@ -196,7 +195,6 @@ class SFTPConnection {
     }
     
     private function uploadFileWithCurl($localFile, $remoteFile) {
-        // Properly encode the path for URL
         $pathParts = explode('/', $remoteFile);
         $encodedParts = array_map('rawurlencode', $pathParts);
         $encodedPath = implode('/', $encodedParts);
@@ -234,10 +232,8 @@ class SFTPConnection {
         if ($this->sftp === 'curl') {
             return $this->deleteFileWithCurl($remoteFile);
         } else {
-            // Use SSH2 SFTP - handles special characters better
             $result = @ssh2_sftp_unlink($this->sftp, $remoteFile);
             if (!$result) {
-                // If SSH2 fails, try using ssh2_exec for more robust delete
                 try {
                     $command = 'rm -f ' . escapeshellarg($remoteFile);
                     $stream = @ssh2_exec($this->connection, $command);
@@ -257,14 +253,18 @@ class SFTPConnection {
     }
     
     private function deleteFileWithCurl($remoteFile) {
-        error_log("   🗑️  DELETE OPERATION (cURL method)");
+        error_log("  DELETE OPERATION (cURL method)");
         error_log("      File path: $remoteFile");
         
-        // CRITICAL: For SFTP delete to work, we need to use POSTQUOTE, not QUOTE
-        // QUOTE executes BEFORE the main request, POSTQUOTE executes AFTER
-        $url = sprintf("sftp://%s:%d/", $this->config['host'], $this->config['port']);
+        // CRITICAL FIX: Use a dummy file download operation to enable POSTQUOTE
+        // POSTQUOTE only executes after a successful transfer operation
+        $pathParts = explode('/', $remoteFile);
+        $encodedParts = array_map('rawurlencode', $pathParts);
+        $encodedPath = implode('/', $encodedParts);
         
-        // Escape the file path properly for the shell command
+        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
+        
+        // Use rm command in POSTQUOTE - but we need a transfer operation first
         $escapedPath = str_replace('"', '\\"', $remoteFile);
         $deleteCommand = 'rm "' . $escapedPath . '"';
         
@@ -275,14 +275,16 @@ class SFTPConnection {
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
         
-        // CRITICAL FIX: Use POSTQUOTE instead of QUOTE
-        // POSTQUOTE executes the command AFTER the transfer completes
+        // KEY FIX: Don't use CURLOPT_NOBODY - we need an actual transfer for POSTQUOTE to work
+        // Instead, download to memory (we'll discard it)
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        
+        // Execute delete AFTER the download completes
         curl_setopt($ch, CURLOPT_POSTQUOTE, array($deleteCommand));
         
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-        curl_setopt($ch, CURLOPT_NOBODY, true); // Don't download file content
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         
         $result = curl_exec($ch);
         $error = curl_error($ch);
@@ -291,13 +293,83 @@ class SFTPConnection {
         curl_close($ch);
         
         if ($error) {
-            error_log("      ❌ cURL Error: $error (Code: $httpCode)");
+            error_log(" cURL Error: $error (Code: $httpCode)");
             throw new Exception("SFTP cURL Delete Error: $error (HTTP Code: $httpCode)");
         }
         
-        error_log("      ✅ Delete command executed");
+        // Verify the file was actually deleted
+        try {
+            $verifyUrl = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
+            $verifyCheck = curl_init();
+            curl_setopt($verifyCheck, CURLOPT_URL, $verifyUrl);
+            curl_setopt($verifyCheck, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+            curl_setopt($verifyCheck, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($verifyCheck, CURLOPT_NOBODY, true);
+            curl_setopt($verifyCheck, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($verifyCheck, CURLOPT_SSL_VERIFYHOST, false);
+            
+            curl_exec($verifyCheck);
+            $verifyCode = curl_getinfo($verifyCheck, CURLINFO_RESPONSE_CODE);
+            curl_close($verifyCheck);
+            
+            // If file still exists (code 200), throw error
+            if ($verifyCode == 200 || $verifyCode == 0) {
+                error_log("  WARNING: File may still exist after delete (verify code: $verifyCode)");
+                error_log("      Attempting alternative delete method...");
+                
+                // Try alternative: Use PREQUOTE with rename to .deleted
+                return $this->deleteFileAlternative($remoteFile);
+            }
+            
+        } catch (Exception $e) {
+            error_log("  Verification check failed (expected): " . $e->getMessage());
+        }
+        
+        error_log(" Delete command executed and verified");
         error_log("      Response code: $httpCode");
         
+        return true;
+    }
+    
+    /**
+     * Alternative delete method: rename file to .deleted extension
+     * This is more reliable than rm in some SFTP implementations
+     */
+    private function deleteFileAlternative($remoteFile) {
+        error_log(" Using alternative delete (rename to .deleted)");
+        
+        $pathParts = explode('/', $remoteFile);
+        $encodedParts = array_map('rawurlencode', $pathParts);
+        $encodedPath = implode('/', $encodedParts);
+        
+        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
+        
+        // Rename to .deleted extension
+        $deletedPath = $remoteFile . '.deleted.' . time();
+        $escapedOld = str_replace('"', '\\"', $remoteFile);
+        $escapedNew = str_replace('"', '\\"', $deletedPath);
+        $renameCommand = 'rename "' . $escapedOld . '" "' . $escapedNew . '"';
+        
+        error_log("      Rename command: $renameCommand");
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POSTQUOTE, array($renameCommand));
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        
+        $result = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($error) {
+            error_log(" Rename failed: $error");
+            throw new Exception("Failed to delete file (both methods): $remoteFile");
+        }
+        
+        error_log("      File renamed to: $deletedPath");
         return true;
     }
     
@@ -326,7 +398,6 @@ class OrderXMLParser {
     }
     
     public function parseXML($xmlContent) {
-        // Detect format based on root element
         if (strpos($xmlContent, '<Workbook') !== false) {
             return $this->parseExcelXML($xmlContent);
         } 
@@ -385,7 +456,6 @@ class OrderXMLParser {
                 'lineItems' => []
             ];
             
-            // Parse Header
             if (isset($document->Header)) {
                 $header = $document->Header;
                 $order['poDate'] = $this->formatLingoDate((string)$header->PurchaseOrderDate) ?: $order['poDate'];
@@ -420,7 +490,6 @@ class OrderXMLParser {
                 }
             }
             
-            // Parse Addresses
             foreach ($document->n as $address) {
                 $code = (string)$address->BillAndShipToCode;
                 $addressData = [
@@ -449,7 +518,6 @@ class OrderXMLParser {
                 }
             }
             
-            // Parse Line Items
             $lineNo = 1;
             foreach ($document->Detail as $detail) {
                 $lineItem = $detail->DetailLine;
@@ -506,7 +574,6 @@ class OrderXMLParser {
                 $lineNo++;
             }
             
-            // Parse Terms
             if (isset($document->Term)) {
                 $order['terms'] = [
                     'termType' => (string)$document->Term->TermsType,
@@ -662,10 +729,6 @@ class OrderXMLParser {
     }
 }
 
-/**
- * Parse files from SFTP WITHOUT ARCHIVING
- * Returns file names for Salesforce to archive later
- */
 function parseSFTPFilesWithoutArchive($config, $parser) {
     error_log("=== EDI 850 ORDER PARSING STARTED (NO ARCHIVE) ===");
     
@@ -706,15 +769,12 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
         error_log("📄 Processing file: $fileName");
         
         try {
-            // Read file content
             $xmlContent = $sftp->getFileContent($fileInfo['path']);
             error_log("  ✓ File read: " . strlen($xmlContent) . " bytes");
             
-            // Parse XML
             $result = $parser->parseXML($xmlContent);
             error_log("  ✓ Parsed: " . $result['totalOrders'] . " orders, " . $result['totalLineItems'] . " line items");
             
-            // Validate that we got orders
             if (!isset($result['orders']) || !is_array($result['orders'])) {
                 throw new Exception("Invalid parse result - no orders array");
             }
@@ -723,10 +783,8 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
                 error_log("  ⚠ WARNING: File parsed but contains 0 orders");
             }
             
-            // Add format
             $formats[] = $result['format'];
             
-            // Add orders to collection
             foreach ($result['orders'] as $order) {
                 $order['sourceFile'] = $fileName;
                 $order['sourceType'] = 'sftp';
@@ -734,7 +792,6 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
                 $allOrders[] = $order;
             }
             
-            // Mark as successfully parsed (for archiving later)
             $processedFileNames[] = $fileName;
             $filesProcessed++;
             
@@ -775,16 +832,12 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
         'totalFiles' => count($files),
         'totalOrders' => count($allOrders),
         'totalLineItems' => $totalLineItems,
-        'processedFileNames' => $processedFileNames, // CRITICAL: Return file names
+        'processedFileNames' => $processedFileNames,
         'fileErrors' => $fileErrors,
         'orders' => $allOrders
     ];
 }
 
-/**
- * Archive specific processed files
- * Called by Salesforce AFTER successful order processing
- */
 function archiveSpecificFiles($config, $fileNames) {
     error_log("=== ARCHIVING PROCESSED FILES ===");
     error_log("Files to archive: " . implode(', ', $fileNames));
@@ -811,7 +864,6 @@ function archiveSpecificFiles($config, $fileNames) {
     $errors = [];
     
     foreach ($fileNames as $fileName) {
-        // Trim and clean file name
         $fileName = trim($fileName);
         error_log("📦 Archiving: $fileName");
         
@@ -822,11 +874,9 @@ function archiveSpecificFiles($config, $fileNames) {
             error_log("  Source: $sourceFile");
             error_log("  Destination: $destFile");
             
-            // Read file content
             $content = $sftp->getFileContent($sourceFile);
             error_log("  1. Read file: " . strlen($content) . " bytes");
             
-            // Create temp file
             $tempFile = sys_get_temp_dir() . '/' . basename($fileName);
             $bytesWritten = file_put_contents($tempFile, $content);
             
@@ -835,11 +885,9 @@ function archiveSpecificFiles($config, $fileNames) {
             }
             error_log("  2. Created temp file: $tempFile ($bytesWritten bytes)");
             
-            // Upload to archived folder
             $sftp->uploadFile($tempFile, $destFile);
             error_log("  3. Uploaded to: $destFile");
             
-            // Verify upload by checking if we can read it back
             try {
                 $verifyContent = $sftp->getFileContent($destFile);
                 if (strlen($verifyContent) !== strlen($content)) {
@@ -850,17 +898,14 @@ function archiveSpecificFiles($config, $fileNames) {
                 throw new Exception("Upload verification failed: " . $e->getMessage());
             }
             
-            // NOW delete from source (only after verified upload)
             try {
                 $sftp->deleteFile($sourceFile);
                 error_log("  5. Deleted from source: $sourceFile");
             } catch (Exception $deleteEx) {
-                // Log but don't fail - file is already in archive
                 error_log("  ⚠ WARNING: Could not delete source file: " . $deleteEx->getMessage());
                 error_log("  ℹ File successfully archived but remains in source");
             }
             
-            // Clean up temp file
             if (file_exists($tempFile)) {
                 unlink($tempFile);
             }
@@ -869,23 +914,14 @@ function archiveSpecificFiles($config, $fileNames) {
             error_log("  ✅ SUCCESSFULLY ARCHIVED: $fileName");
             
         } catch (Exception $e) {
-            $errorDetail = [
-                'file' => $fileName,
-                'error' => $e->getMessage(),
-                'line' => $e->getLine(),
-                'trace' => $e->getTraceAsString()
-            ];
             $errors[] = "$fileName: " . $e->getMessage();
             error_log("  ❌ ARCHIVE FAILED for $fileName: " . $e->getMessage());
             error_log("  Error Line: " . $e->getLine());
-            error_log("  Stack Trace: " . $e->getTraceAsString());
             
-            // Clean up temp file on error
             if (isset($tempFile) && file_exists($tempFile)) {
                 unlink($tempFile);
             }
             
-            // CRITICAL: If archive fails, the file stays in source folder for retry
             error_log("  ⚠ File remains in source folder for retry");
         }
     }
@@ -917,7 +953,6 @@ try {
     
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         if (isset($_GET['action']) && $_GET['action'] === 'parseSftp') {
-            // Parse files WITHOUT archiving
             $result = parseSFTPFilesWithoutArchive($SFTP_CONFIG, $parser);
         } else {
             throw new Exception("Invalid GET action. Use ?action=parseSftp");
@@ -931,7 +966,6 @@ try {
         }
         
         if (isset($input['action']) && $input['action'] === 'archiveFiles') {
-            // Archive specific files
             if (!isset($input['files']) || !is_array($input['files'])) {
                 throw new Exception("Missing 'files' array in request body");
             }
