@@ -3,8 +3,12 @@
  * WooCommerce Orders XML Parser API - COMPLETE DUAL FORMAT SUPPORT
  * Supports both Excel XML and Lingo XML formats
  * 
- * Version: 2.0
+ * Version: 3.0 - FIXED ARCHIVE LOGIC
  * Last Updated: January 2026
+ * 
+ * ENDPOINTS:
+ * - GET  ?action=parseSftp   → Parse XML files (does NOT archive)
+ * - POST action=archiveFiles → Archive specific files after Salesforce processing
  */
 
 header('Content-Type: application/json');
@@ -25,70 +29,6 @@ $SFTP_CONFIG = [
     'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD'),
     'remote_path' => getenv('SFTP_REMOTE_PATH') ?: '/EDI850_Orders'
 ];
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $input = json_decode(file_get_contents('php://input'), true);
-    
-    // Check if this is a move-files request
-    if (isset($input['sourcePath']) && isset($input['destinationPath'])) {
-        $SFTP_CONFIG = [
-            'host' => $_SERVER['HTTP_SFTP_HOST'] ?? getenv('SFTP_HOST'),
-            'port' => $_SERVER['HTTP_SFTP_PORT'] ?? getenv('SFTP_PORT') ?: 22,
-            'username' => $_SERVER['HTTP_USERNAME'] ?? getenv('SFTP_USERNAME'),
-            'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD')
-        ];
-        
-        $sourcePath = $input['sourcePath'];
-        $destinationPath = $input['destinationPath'];
-        
-        try {
-            $sftp = new SFTPConnection($SFTP_CONFIG);
-            $sftp->connect();
-            
-            $files = $sftp->listFiles($sourcePath);
-            $movedCount = 0;
-            
-            foreach ($files as $file) {
-                $sourceFile = rtrim($sourcePath, '/') . '/' . $file['filename'];
-                $destFile = rtrim($destinationPath, '/') . '/' . $file['filename'];
-                
-                $content = $sftp->getFileContent($sourceFile);
-                
-                $tempFile = sys_get_temp_dir() . '/' . $file['filename'];
-                file_put_contents($tempFile, $content);
-                
-                $sftp->uploadFile($tempFile, $destFile);
-                $sftp->deleteFile($sourceFile);
-                
-                unlink($tempFile);
-                $movedCount++;
-            }
-            
-            $sftp->disconnect();
-            
-            http_response_code(200);
-            echo json_encode([
-                'success' => true,
-                'filesMoved' => $movedCount
-            ]);
-            
-        } catch (Exception $e) {
-            http_response_code(400);
-            echo json_encode([
-                'success' => false,
-                'error' => $e->getMessage()
-            ]);
-        }
-        exit;  // Important: exit after handling move-files
-    }
-}
-//$SFTP_CONFIG = [
-//    'host' => getenv('SFTP_HOST') ?: 'virginia.sftptogo.com',
-//    'port' => getenv('SFTP_PORT') ?: 22,
-//    'username' => getenv('SFTP_USERNAME') ?: 'def00441166779c394b1ebf405d60a',
-//    'password' => getenv('SFTP_PASSWORD') ?: '7Ivut003QohHdnzxzsPzKbkTbGGWHj',
-//    'remote_path' => getenv('SFTP_REMOTE_PATH') ?: '/EDI_Orders'
-//];
 
 /**
  * SFTP Connection Class
@@ -137,7 +77,11 @@ class SFTPConnection {
         if ($this->sftp === 'curl') {
             return $this->listFilesWithCurl($remotePath);
         } else {
-            $handle = opendir("ssh2.sftp://{$this->sftp}" . $remotePath);
+            $handle = @opendir("ssh2.sftp://{$this->sftp}" . $remotePath);
+            if (!$handle) {
+                throw new Exception("Failed to open directory: $remotePath");
+            }
+            
             while (false !== ($file = readdir($handle))) {
                 if ($file === '.' || $file === '..') continue;
                 if (preg_match('/\.xml$/i', $file)) {
@@ -146,8 +90,8 @@ class SFTPConnection {
                     $files[] = [
                         'filename' => $file,
                         'path' => $fullPath,
-                        'size' => filesize($sftpPath),
-                        'modified' => date('Y-m-d H:i:s', filemtime($sftpPath))
+                        'size' => @filesize($sftpPath) ?: 0,
+                        'modified' => @filemtime($sftpPath) ? date('Y-m-d H:i:s', filemtime($sftpPath)) : null
                     ];
                 }
             }
@@ -177,6 +121,7 @@ class SFTPConnection {
         $files = [];
         $fileNames = array_filter(explode("\n", trim($fileList)));
         foreach ($fileNames as $file) {
+            $file = trim($file);
             if (preg_match('/\.xml$/i', $file)) {
                 $files[] = [
                     'filename' => $file,
@@ -194,7 +139,11 @@ class SFTPConnection {
             return $this->getFileContentWithCurl($remoteFile);
         } else {
             $sftpPath = "ssh2.sftp://{$this->sftp}" . $remoteFile;
-            return file_get_contents($sftpPath);
+            $content = @file_get_contents($sftpPath);
+            if ($content === false) {
+                throw new Exception("Failed to read file: $remoteFile");
+            }
+            return $content;
         }
     }
     
@@ -221,13 +170,14 @@ class SFTPConnection {
         if ($this->sftp === 'curl') {
             return $this->uploadFileWithCurl($localFile, $remoteFile);
         } else {
-            $stream = fopen("ssh2.sftp://{$this->sftp}" . $remoteFile, 'w');
+            $stream = @fopen("ssh2.sftp://{$this->sftp}" . $remoteFile, 'w');
             if (!$stream) {
                 throw new Exception("Failed to open remote file for writing: $remoteFile");
             }
             
             $data = file_get_contents($localFile);
             if (fwrite($stream, $data) === false) {
+                fclose($stream);
                 throw new Exception("Failed to write to remote file: $remoteFile");
             }
             
@@ -241,6 +191,9 @@ class SFTPConnection {
         $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
         
         $fp = fopen($localFile, 'r');
+        if (!$fp) {
+            throw new Exception("Failed to open local file: $localFile");
+        }
         
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
@@ -268,7 +221,11 @@ class SFTPConnection {
         if ($this->sftp === 'curl') {
             return $this->deleteFileWithCurl($remoteFile);
         } else {
-            return ssh2_sftp_unlink($this->sftp, $remoteFile);
+            $result = @ssh2_sftp_unlink($this->sftp, $remoteFile);
+            if (!$result) {
+                throw new Exception("Failed to delete file: $remoteFile");
+            }
+            return true;
         }
     }
     
@@ -318,9 +275,6 @@ class OrderXMLParser {
         return $this->parseXML($xmlContent);
     }
     
-    /**
-     * Auto-detect format and parse accordingly
-     */
     public function parseXML($xmlContent) {
         // Detect format based on root element
         if (strpos($xmlContent, '<Workbook') !== false) {
@@ -334,9 +288,6 @@ class OrderXMLParser {
         }
     }
     
-    /**
-     * Parse Excel XML format 
-     */
     private function parseExcelXML($xmlContent) {
         $xml = simplexml_load_string($xmlContent);
         if ($xml === false) throw new Exception("Failed to parse Excel XML");
@@ -357,9 +308,6 @@ class OrderXMLParser {
         ];
     }
     
-    /**
-     * Parse Lingo XML format - COMPLETE WITH ALL TAGS
-     */
     private function parseLingoXML($xmlContent) {
         $xml = simplexml_load_string($xmlContent);
         if ($xml === false) throw new Exception("Failed to parse Lingo XML");
@@ -368,107 +316,65 @@ class OrderXMLParser {
         
         foreach ($xml->Document as $document) {
             $order = [
-                // Document Level Tags - ALL INCLUDED
                 'documentId' => (string)$document->InternalDocumentNumber ?: (string)$document->InternalOrderNumber,
                 'companyCode' => (string)$document->CompanyCode,
                 'customerNo' => (string)$document->CustomerNumber,
                 'poNumber' => (string)$document->PurchaseOrderNumber,
-                'poSourceId' => (string)$document->PurchaseOrderSourceID,
-                'locationNumber' => (string)$document->LocationNumber,
-                'direction' => (string)$document->Direction,
-                'documentType' => (string)$document->DocumentType,
-                'footprint' => (string)$document->Footprint,
-                'version' => (string)$document->Version,
                 'vendorNo' => '',
                 'poDate' => $this->formatLingoDate((string)$document->PurchaseOrderDate),
                 'shipDateOrder' => '',
                 'cancelDate' => '',
-                'requestedDeliveryDate' => '',
                 'orderAmount' => 0,
                 'orderCases' => 0,
                 'orderWeight' => 0,
-                'totalLines' => 0,
                 'methodOfPayment' => '',
-                'transportationMethodCode' => '',
-                'customerAccountNumber' => '',
                 'billTo' => [],
                 'shipTo' => [],
                 'shipFrom' => [],
-                'remitTo' => [],
-                'vendor' => [],
                 'terms' => [],
-                'notes' => [],
                 'lineItems' => []
             ];
             
-            // Parse Header section - ALL TAGS
+            // Parse Header
             if (isset($document->Header)) {
                 $header = $document->Header;
-                
-                // Basic Header Fields
                 $order['poDate'] = $this->formatLingoDate((string)$header->PurchaseOrderDate) ?: $order['poDate'];
                 $order['vendorNo'] = (string)$header->VendorNumber;
-                $order['customerAccountNumber'] = (string)$header->CustomerAccountNumber;
-                $order['transportationMethodCode'] = (string)$header->TransportationMethodCode;
                 
-                // Order Totals
                 if (isset($header->OrderTotals)) {
                     $order['orderAmount'] = (float)$header->OrderTotals->TotalAmount;
-                    $order['totalLines'] = (int)$header->OrderTotals->TotalLines;
-                    
-                    // Weight
                     if (isset($header->OrderTotals->Weight->UOM->Quantity)) {
                         $order['orderWeight'] = (float)$header->OrderTotals->Weight->UOM->Quantity;
                     }
-                    
-                    // Cartons/Cases
                     if (isset($header->OrderTotals->Cartons->UOM->Quantity)) {
                         $order['orderCases'] = (int)$header->OrderTotals->Cartons->UOM->Quantity;
                     }
                 }
                 
-                // Date Loops - Extract ALL date types
                 foreach ($header->DateLoop as $dateLoop) {
                     $qualifier = (string)$dateLoop->DateQualifier;
-                    $qualifierDesc = (string)$dateLoop->DateQualifier['Desc'];
                     $date = $this->formatLingoDate((string)$dateLoop->Date);
                     
                     switch ($qualifier) {
-                        case '004': // PO Date
+                        case '004':
                             $order['poDate'] = $date;
                             break;
-                        case '010': // Ship Date
+                        case '010':
                         case '011':
                             $order['shipDateOrder'] = $date;
                             break;
-                        case '001': // Cancel Date
+                        case '001':
                             $order['cancelDate'] = $date;
-                            break;
-                        case '074': // Requested Delivery Date
-                            $order['requestedDeliveryDate'] = $date;
                             break;
                     }
                 }
-                
-                // Notes - Capture ALL notes
-                foreach ($header->Note as $note) {
-                    $order['notes'][] = [
-                        'sequenceNumber' => (string)$note->SequenceNumber,
-                        'detailLineNumber' => (string)$note->DetailLineNumber,
-                        'text' => (string)$note->Text,
-                        'type' => (string)$note->Type,
-                        'typeDesc' => (string)$note->Type['Desc']
-                    ];
-                }
             }
             
-            // Parse Name/Address sections
+            // Parse Addresses
             foreach ($document->n as $address) {
                 $code = (string)$address->BillAndShipToCode;
-                
                 $addressData = [
                     'storeNumber' => (string)$address->DUNSOrLocationNumber,
-                    'dunsQualifier' => (string)$address->DUNSQualifier,
                     'companyName1' => (string)$address->CompanyName,
                     'companyName2' => '',
                     'address1' => (string)$address->Address,
@@ -481,217 +387,83 @@ class OrderXMLParser {
                 ];
                 
                 switch ($code) {
-                    case 'BT': // Bill-To
+                    case 'BT':
                         $order['billTo'] = $addressData;
                         break;
-                    case 'ST': // Ship-To
+                    case 'ST':
                         $order['shipTo'] = $addressData;
                         break;
-                    case 'SF': // Ship-From
+                    case 'SF':
                         $order['shipFrom'] = $addressData;
-                        break;
-                    case 'RE': // Remit-To
-                        $order['remitTo'] = $addressData;
-                        break;
-                    case 'VN': // Vendor
-                        $order['vendor'] = $addressData;
-                        $order['vendorNo'] = $addressData['storeNumber'];
                         break;
                 }
             }
             
-            // Parse Detail/Line Items
+            // Parse Line Items
             $lineNo = 1;
             foreach ($document->Detail as $detail) {
                 $lineItem = $detail->DetailLine;
                 
-                // Item IDs - Extract ALL types (UP, UA, UK, etc.)
                 $vendorItemNo = '';
                 $upcCode = '';
-                $caseUPC = '';
-                $gtin = '';
-                
                 foreach ($lineItem->ItemIds as $itemId) {
                     $qualifier = (string)$itemId->IdQualifier;
-                    $qualifierDesc = (string)$itemId->IdQualifier['Desc'];
                     $id = (string)$itemId->Id;
-                    
-                    switch ($qualifier) {
-                        case 'UP': // Vendor Item / UPC Code
-                            if ($qualifierDesc === 'UpcCode' || empty($vendorItemNo)) {
-                                $upcCode = $id;
-                            }
-                            $vendorItemNo = $id;
-                            break;
-                        case 'UA': // Unit UPC / Case Code
-                            if ($qualifierDesc === 'UpcCaseCode') {
-                                $caseUPC = $id;
-                            } else {
-                                $upcCode = $id;
-                            }
-                            break;
-                        case 'UK': // GTIN / Case UPC
-                            if ($qualifierDesc === 'GTINNumber') {
-                                $gtin = $id;
-                            }
-                            $caseUPC = $id;
-                            break;
+                    if ($qualifier === 'UP') {
+                        $vendorItemNo = $id;
+                        $upcCode = $id;
                     }
                 }
                 
-                // Quantities - Extract ALL quantity types
                 $quantity = 0;
-                $quantityChanged = 0;
-                $quantityAcked = 0;
-                $quantityShipped = 0;
-                $quantityInvoiced = 0;
-                $originalQuantity = 0;
-                $componentQuantity = 0;
                 $uom = '';
-                
                 foreach ($lineItem->Quantities as $qty) {
                     $qualifier = (string)$qty->QtyQualifier;
-                    $qualifierDesc = (string)$qty->QtyQualifier['Desc'];
-                    $qtyValue = (int)$qty->Qty;
-                    $qtyUOM = (string)$qty->QtyUOM;
-                    
-                    if (empty($uom)) $uom = $qtyUOM;
-                    
-                    switch ($qualifier) {
-                        case '01': // Quantity Ordered
-                        case '38': // Quantity Ordered
-                            $quantity = $qtyValue;
-                            break;
-                        case 'ZZ': // Original Quantity
-                            $originalQuantity = $qtyValue;
-                            break;
-                        case '31': // Quantity Changed
-                            $quantityChanged = $qtyValue;
-                            break;
-                        case '27': // Quantity Acknowledged
-                            $quantityAcked = $qtyValue;
-                            break;
-                        case '39': // Quantity Shipped
-                            $quantityShipped = $qtyValue;
-                            break;
-                        case 'D1': // Quantity Invoiced
-                            $quantityInvoiced = $qtyValue;
-                            break;
-                        case '9N': // Component Quantity
-                            $componentQuantity = $qtyValue;
-                            break;
+                    if ($qualifier === '01' || $qualifier === '38') {
+                        $quantity = (int)$qty->Qty;
+                        $uom = (string)$qty->QtyUOM;
+                        break;
                     }
                 }
                 
-                // Price/Cost - ALL pricing fields
                 $unitPrice = 0;
-                $originalPrice = 0;
-                $priceBasis = '';
-                $priceBasisQualifier = '';
-                
                 if (isset($lineItem->PriceCost)) {
                     $unitPrice = (float)$lineItem->PriceCost->PriceOrCost;
-                    $priceBasis = (string)$lineItem->PriceCost->PriceBasisCode;
-                    $priceBasisQualifier = (string)$lineItem->PriceCost->PriceBasisQualifier;
-                    $originalPrice = $unitPrice; // Default to unit price
                 }
                 
-                // Pack Information - ALL pack fields
-                $packSize = (string)$lineItem->PackSize;
-                $inners = (string)$lineItem->Inners;
-                $eachesPerInner = (string)$lineItem->EachesPerInner;
-                $innersPerPack = (string)$lineItem->InnersPerPack;
-                
-                // Line Totals
-                $lineTotal = 0;
-                $totalSubLines = 0;
-                if (isset($lineItem->LineTotals)) {
-                    $lineTotal = (float)$lineItem->LineTotals->TotalAmount;
-                    $totalSubLines = (int)$lineItem->LineTotals->TotalSubLines;
-                }
-                
-                // Build Line Item
                 $item = [
                     'lineNo' => str_pad((string)$lineItem->CustomerLineNumber ?: $lineNo, 4, '0', STR_PAD_LEFT),
-                    'internalLineNumber' => (string)$lineItem->InternalLineNumber,
-                    'originalLineNumber' => (string)$lineItem->OriginalLineNumber,
                     'vendorItemNo' => $vendorItemNo,
                     'upcCode' => $upcCode,
-                    'caseUPC' => $caseUPC,
-                    'gtin' => $gtin,
                     'customerItem' => '',
                     'quantityOrdered' => $quantity,
-                    'originalQuantity' => $originalQuantity,
-                    'quantityChanged' => $quantityChanged,
-                    'quantityAcked' => $quantityAcked,
-                    'quantityShipped' => $quantityShipped,
-                    'quantityInvoiced' => $quantityInvoiced,
-                    'componentQuantity' => $componentQuantity,
                     'unitMeasure' => $uom,
                     'unitPrice' => $unitPrice,
-                    'originalPrice' => $originalPrice,
+                    'originalPrice' => $unitPrice,
                     'sellingPrice' => $unitPrice,
-                    'priceBasis' => $priceBasis,
-                    'priceBasisQualifier' => $priceBasisQualifier,
-                    'lineTotal' => $lineTotal ?: ($unitPrice * $quantity),
-                    'totalSubLines' => $totalSubLines,
-                    'packSize' => $packSize,
-                    'inners' => $inners,
-                    'eachesPerInner' => $eachesPerInner,
-                    'innersPerPack' => $innersPerPack,
+                    'lineTotal' => $unitPrice * $quantity,
+                    'packSize' => (string)$lineItem->PackSize,
                     'itemDesc' => (string)$lineItem->ItemDescription,
                     'itemDesc2' => '',
+                    'gtin' => '',
                     'sku' => '',
-                    'upcCaseCode' => $caseUPC,
+                    'upcCaseCode' => '',
                     'countryOfOrigin' => '',
-                    'shipDateDetail' => '',
-                    'notes' => [],
-                    'chargesOrAllowances' => []
+                    'shipDateDetail' => ''
                 ];
                 
                 $order['lineItems'][] = $item;
-                
-                // Line-level Notes
-                foreach ($detail->Note as $note) {
-                    if ((string)$note->DetailLineNumber === $item['lineNo']) {
-                        $item['notes'][] = [
-                            'sequenceNumber' => (string)$note->SequenceNumber,
-                            'text' => (string)$note->Text,
-                            'type' => (string)$note->Type,
-                            'typeDesc' => (string)$note->Type['Desc']
-                        ];
-                    }
-                }
-                
-                // Charge or Allowance
-                foreach ($detail->ChargeOrAllowance as $charge) {
-                    if ((string)$charge->DetailLineNumber === $item['lineNo']) {
-                        $item['chargesOrAllowances'][] = [
-                            'sequenceNumber' => (string)$charge->SequenceNumber,
-                            'indicator' => (string)$charge->Indicator,
-                            'indicatorDesc' => (string)$charge->Indicator['Desc'],
-                            'specialServiceCode' => (string)$charge->SpecialServiceCode,
-                            'specialServiceDesc' => (string)$charge->SpecialServiceCode['Desc'],
-                            'methodOfHandlingCode' => (string)$charge->MethodOfHandlingCode,
-                            'methodOfHandlingDesc' => (string)$charge->MethodOfHandlingCode['Desc'],
-                            'totalAmount' => (float)$charge->TotalAmount
-                        ];
-                    }
-                }
-                
                 $lineNo++;
             }
             
-            // Parse Terms - ALL term fields
+            // Parse Terms
             if (isset($document->Term)) {
                 $order['terms'] = [
                     'termType' => (string)$document->Term->TermsType,
                     'basis' => (string)$document->Term->TermsBasis,
-                    'netDueDate' => $this->formatLingoDate((string)$document->Term->NetDueDate),
-                    'netDueDays' => (int)$document->Term->NetDueDays,
-                    'discountDays' => (int)$document->Term->DiscountDays,
-                    'discountPercent' => (float)$document->Term->DiscountPercent,
-                    'discountAmount' => (float)$document->Term->DiscountAmount
+                    'dueDays' => '',
+                    'netDays' => (int)$document->Term->NetDueDays,
+                    'discountPercent' => (float)$document->Term->DiscountPercent
                 ];
             }
             
@@ -712,28 +484,17 @@ class OrderXMLParser {
         ];
     }
     
-    /**
-     * Format Lingo date (YYYY-MM-DD) to M/D/YYYY
-     */
     private function formatLingoDate($dateStr) {
         if (empty($dateStr)) return '';
-        
-        // Already in M/D/YYYY format
         if (preg_match('/^\d{1,2}\/\d{1,2}\/\d{4}$/', $dateStr)) {
             return $dateStr;
         }
-        
-        // Convert YYYY-MM-DD to M/D/YYYY
         if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $dateStr, $matches)) {
             return intval($matches[2]) . '/' . intval($matches[3]) . '/' . $matches[1];
         }
-        
         return $dateStr;
     }
     
-    /**
-     * Parse Excel header row
-     */
     private function parseExcelHeaders($headerRow) {
         $dataCells = $headerRow->xpath('.//ss:Data');
         if (empty($dataCells)) throw new Exception("No header data found");
@@ -741,9 +502,6 @@ class OrderXMLParser {
         $this->headers = explode('|', $headerString);
     }
     
-    /**
-     * Parse Excel data rows
-     */
     private function parseExcelDataRows($dataRows) {
         $orderGroups = [];
         
@@ -855,32 +613,70 @@ class OrderXMLParser {
 }
 
 /**
- * Parse files from SFTP
+ * Parse files from SFTP WITHOUT ARCHIVING
+ * Returns file names for Salesforce to archive later
  */
-function parseSFTPFiles($config, $parser) {
+function parseSFTPFilesWithoutArchive($config, $parser) {
+    error_log("=== EDI 850 ORDER PARSING STARTED (NO ARCHIVE) ===");
+    
     $sftp = new SFTPConnection($config);
     $sftp->connect();
     
+    error_log("SFTP Connected: " . $config['host']);
+    
     $files = $sftp->listFiles($config['remote_path']);
-    if (empty($files)) throw new Exception("No XML files found on SFTP server");
+    error_log("Files found: " . count($files));
+    
+    if (empty($files)) {
+        $sftp->disconnect();
+        return [
+            'success' => true,
+            'source' => 'sftp',
+            'formats' => [],
+            'sftpHost' => $config['host'],
+            'remotePath' => $config['remote_path'],
+            'filesProcessed' => 0,
+            'totalFiles' => 0,
+            'totalOrders' => 0,
+            'totalLineItems' => 0,
+            'processedFileNames' => [],
+            'fileErrors' => [],
+            'orders' => []
+        ];
+    }
     
     $allOrders = [];
     $filesProcessed = 0;
     $fileErrors = [];
     $formats = [];
-    $movedFiles = [];
-    $archiveErrors = [];
+    $processedFileNames = [];
     
     foreach ($files as $fileInfo) {
         $fileName = $fileInfo['filename'];
+        error_log("Processing file: $fileName");
         
         try {
-            // STEP 1: Read and parse the file
+            // Read file content
             $xmlContent = $sftp->getFileContent($fileInfo['path']);
-            $result = $parser->parseXML($xmlContent);
+            error_log("  File read: " . strlen($xmlContent) . " bytes");
             
+            // Parse XML
+            $result = $parser->parseXML($xmlContent);
+            error_log("  Parsed: " . $result['totalOrders'] . " orders, " . $result['totalLineItems'] . " line items");
+            
+            // Validate that we got orders
+            if (!isset($result['orders']) || !is_array($result['orders'])) {
+                throw new Exception("Invalid parse result - no orders array");
+            }
+            
+            if ($result['totalOrders'] === 0) {
+                error_log("  WARNING: File parsed but contains 0 orders");
+            }
+            
+            // Add format
             $formats[] = $result['format'];
             
+            // Add orders to collection
             foreach ($result['orders'] as $order) {
                 $order['sourceFile'] = $fileName;
                 $order['sourceType'] = 'sftp';
@@ -888,70 +684,36 @@ function parseSFTPFiles($config, $parser) {
                 $allOrders[] = $order;
             }
             
+            // Mark as successfully parsed (for archiving later)
+            $processedFileNames[] = $fileName;
             $filesProcessed++;
             
-            // STEP 2: Move to /Archived IMMEDIATELY after successful parsing
-            try {
-                $sourcePath = $config['remote_path'];
-                $archivePath = '/Archived';
-                
-                $sourceFile = rtrim($sourcePath, '/') . '/' . $fileName;
-                $destFile = rtrim($archivePath, '/') . '/' . $fileName;
-                
-                $archived = false;
-                
-                // Method 1: Try native SSH2 rename (fastest) - ONLY if using SSH2
-                if ($sftp->sftp !== 'curl' && function_exists('ssh2_sftp_rename')) {
-                    try {
-                        $renamed = @ssh2_sftp_rename($sftp->sftp, $sourceFile, $destFile);
-                        if ($renamed) {
-                            $movedFiles[] = $fileName;
-                            $archived = true;
-                        }
-                    } catch (Exception $e) {
-                        error_log("SSH2 rename failed for $fileName: " . $e->getMessage());
-                    }
-                }
-                
-                // Method 2: Copy + Delete (fallback if rename failed or using cURL)
-                if (!$archived) {
-                    $tempFile = sys_get_temp_dir() . '/' . basename($fileName);
-                    
-                    if (file_put_contents($tempFile, $xmlContent) === false) {
-                        throw new Exception("Failed to write temp file");
-                    }
-                    
-                    $sftp->uploadFile($tempFile, $destFile);
-                    $sftp->deleteFile($sourceFile);
-                    
-                    if (file_exists($tempFile)) {
-                        unlink($tempFile);
-                    }
-                    
-                    $movedFiles[] = $fileName;
-                }
-                
-            } catch (Exception $e) {
-                // Archive failed, but parsing succeeded - log it
-                $archiveErrors[] = "$fileName: " . $e->getMessage();
-                error_log("Archive error for $fileName: " . $e->getMessage());
-            }
+            error_log("  File parsing complete: $fileName");
             
         } catch (Exception $e) {
             $fileErrors[] = [
                 'file' => $fileName,
                 'error' => $e->getMessage()
             ];
-            error_log("File processing error for $fileName: " . $e->getMessage());
+            error_log("  Parsing FAILED for $fileName: " . $e->getMessage());
         }
     }
     
     $sftp->disconnect();
+    error_log("SFTP Disconnected");
     
     $totalLineItems = 0;
     foreach ($allOrders as $order) {
         $totalLineItems += count($order['lineItems']);
     }
+    
+    error_log("=== PARSING COMPLETE (FILES NOT ARCHIVED) ===");
+    error_log("Successfully parsed files: $filesProcessed");
+    error_log("Failed files: " . count($fileErrors));
+    error_log("Total orders extracted: " . count($allOrders));
+    error_log("Total line items: $totalLineItems");
+    error_log("Files to be archived by Salesforce: " . implode(', ', $processedFileNames));
+    error_log("=============================================");
     
     return [
         'success' => true,
@@ -963,49 +725,160 @@ function parseSFTPFiles($config, $parser) {
         'totalFiles' => count($files),
         'totalOrders' => count($allOrders),
         'totalLineItems' => $totalLineItems,
+        'processedFileNames' => $processedFileNames, // CRITICAL: Return file names
         'fileErrors' => $fileErrors,
-        'filesArchived' => count($movedFiles),
-        'archivedFiles' => $movedFiles,
-        'archiveErrors' => $archiveErrors,
-        'orders' => $allOrders,
+        'orders' => $allOrders
     ];
 }
 
-// Main API Logic
+/**
+ * Archive specific processed files
+ * Called by Salesforce AFTER successful order processing
+ */
+function archiveSpecificFiles($config, $fileNames) {
+    error_log("=== ARCHIVING PROCESSED FILES ===");
+    error_log("Files to archive: " . implode(', ', $fileNames));
+    
+    $sftp = new SFTPConnection($config);
+    $sftp->connect();
+    
+    $sourcePath = $config['remote_path'];
+    $archivePath = '/Archived';
+    
+    $archived = [];
+    $errors = [];
+    
+    foreach ($fileNames as $fileName) {
+        error_log(" Archiving: $fileName");
+        
+        try {
+            $sourceFile = rtrim($sourcePath, '/') . '/' . $fileName;
+            $destFile = rtrim($archivePath, '/') . '/' . $fileName;
+            
+            // Read file content
+            $content = $sftp->getFileContent($sourceFile);
+            error_log("  1. Read file: " . strlen($content) . " bytes");
+            
+            // Create temp file
+            $tempFile = sys_get_temp_dir() . '/' . basename($fileName);
+            $bytesWritten = file_put_contents($tempFile, $content);
+            
+            if ($bytesWritten === false || $bytesWritten === 0) {
+                throw new Exception("Failed to create temp file");
+            }
+            error_log("  2. Created temp file: $tempFile ($bytesWritten bytes)");
+            
+            // Upload to archived folder
+            $sftp->uploadFile($tempFile, $destFile);
+            error_log("  3. Uploaded to: $destFile");
+            
+            // Verify upload by checking if we can read it back
+            try {
+                $verifyContent = $sftp->getFileContent($destFile);
+                if (strlen($verifyContent) !== strlen($content)) {
+                    throw new Exception("Upload verification failed - size mismatch");
+                }
+                error_log("  4. Upload verified (size matches)");
+            } catch (Exception $e) {
+                throw new Exception("Upload verification failed: " . $e->getMessage());
+            }
+            
+            // NOW delete from source (only after verified upload)
+            $sftp->deleteFile($sourceFile);
+            error_log("  5. Deleted from source: $sourceFile");
+            
+            // Clean up temp file
+            if (file_exists($tempFile)) {
+                unlink($tempFile);
+            }
+            
+            $archived[] = $fileName;
+            error_log("  SUCCESSFULLY ARCHIVED: $fileName");
+            
+        } catch (Exception $e) {
+            $errors[] = "$fileName: " . $e->getMessage();
+            error_log("  ARCHIVE FAILED for $fileName: " . $e->getMessage());
+            
+            // Clean up temp file on error
+            if (isset($tempFile) && file_exists($tempFile)) {
+                unlink($tempFile);
+            }
+            
+            // CRITICAL: If archive fails, the file stays in source folder for retry
+            error_log("  File remains in source folder for retry");
+        }
+    }
+    
+    $sftp->disconnect();
+    error_log("SFTP Disconnected");
+    
+    error_log("=== ARCHIVE COMPLETE ===");
+    error_log("Successfully archived: " . count($archived));
+    error_log("Archive errors: " . count($errors));
+    error_log("========================");
+    
+    return [
+        'success' => count($errors) === 0,
+        'archivedCount' => count($archived),
+        'errorCount' => count($errors),
+        'archivedFiles' => $archived,
+        'errors' => $errors
+    ];
+}
+
+// ========================================
+// MAIN API LOGIC
+// ========================================
+
 try {
     $parser = new OrderXMLParser();
     $result = null;
-    $directory = __DIR__ . '/orders';
     
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         if (isset($_GET['action']) && $_GET['action'] === 'parseSftp') {
-            $result = parseSFTPFiles($SFTP_CONFIG, $parser);
+            // Parse files WITHOUT archiving
+            $result = parseSFTPFilesWithoutArchive($SFTP_CONFIG, $parser);
         } else {
-            $fileName = $_GET['file'] ?? 'wc-orders.xml';
-            $filePath = $directory . '/' . basename($fileName);
-            $result = $parser->parseFile($filePath);
+            throw new Exception("Invalid GET action. Use ?action=parseSftp");
         }
-    } elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        if (isset($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
-            $result = $parser->parseFile($_FILES['file']['tmp_name']);
+    } 
+    elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $input = json_decode(file_get_contents('php://input'), true);
+        
+        if (!$input) {
+            throw new Exception("Invalid JSON in POST body");
+        }
+        
+        if (isset($input['action']) && $input['action'] === 'archiveFiles') {
+            // Archive specific files
+            if (!isset($input['files']) || !is_array($input['files'])) {
+                throw new Exception("Missing 'files' array in request body");
+            }
+            
+            if (empty($input['files'])) {
+                throw new Exception("Empty 'files' array - nothing to archive");
+            }
+            
+            $result = archiveSpecificFiles($SFTP_CONFIG, $input['files']);
         } else {
-            $xmlContent = file_get_contents('php://input');
-            if (empty($xmlContent)) throw new Exception("No XML content provided");
-            $result = $parser->parseXML($xmlContent);
+            throw new Exception("Invalid POST action. Use action=archiveFiles with files array");
         }
-    } else {
-        throw new Exception("Method not allowed");
+    } 
+    else {
+        throw new Exception("Method not allowed. Use GET or POST.");
     }
     
     http_response_code(200);
     echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     
 } catch (Exception $e) {
-    http_response_code(400);
+    error_log("API ERROR: " . $e->getMessage());
+    error_log("Stack trace: " . $e->getTraceAsString());
+    
+    http_response_code(500);
     echo json_encode([
         'success' => false,
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
 ?>
-
