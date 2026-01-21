@@ -653,16 +653,16 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
     
     foreach ($files as $fileInfo) {
         $fileName = $fileInfo['filename'];
-        error_log("Processing file: $fileName");
+        error_log("📄 Processing file: $fileName");
         
         try {
             // Read file content
             $xmlContent = $sftp->getFileContent($fileInfo['path']);
-            error_log("  File read: " . strlen($xmlContent) . " bytes");
+            error_log("  ✓ File read: " . strlen($xmlContent) . " bytes");
             
             // Parse XML
             $result = $parser->parseXML($xmlContent);
-            error_log("  Parsed: " . $result['totalOrders'] . " orders, " . $result['totalLineItems'] . " line items");
+            error_log("  ✓ Parsed: " . $result['totalOrders'] . " orders, " . $result['totalLineItems'] . " line items");
             
             // Validate that we got orders
             if (!isset($result['orders']) || !is_array($result['orders'])) {
@@ -670,7 +670,7 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
             }
             
             if ($result['totalOrders'] === 0) {
-                error_log("  WARNING: File parsed but contains 0 orders");
+                error_log("  ⚠ WARNING: File parsed but contains 0 orders");
             }
             
             // Add format
@@ -688,14 +688,14 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
             $processedFileNames[] = $fileName;
             $filesProcessed++;
             
-            error_log("  File parsing complete: $fileName");
+            error_log("  ✅ File parsing complete: $fileName");
             
         } catch (Exception $e) {
             $fileErrors[] = [
                 'file' => $fileName,
                 'error' => $e->getMessage()
             ];
-            error_log("  Parsing FAILED for $fileName: " . $e->getMessage());
+            error_log("  ❌ Parsing FAILED for $fileName: " . $e->getMessage());
         }
     }
     
@@ -739,8 +739,20 @@ function archiveSpecificFiles($config, $fileNames) {
     error_log("=== ARCHIVING PROCESSED FILES ===");
     error_log("Files to archive: " . implode(', ', $fileNames));
     
-    $sftp = new SFTPConnection($config);
-    $sftp->connect();
+    try {
+        $sftp = new SFTPConnection($config);
+        $sftp->connect();
+        error_log("✅ SFTP Connected for archiving");
+    } catch (Exception $e) {
+        error_log("❌ SFTP Connection failed: " . $e->getMessage());
+        return [
+            'success' => false,
+            'archivedCount' => 0,
+            'errorCount' => count($fileNames),
+            'archivedFiles' => [],
+            'errors' => ['SFTP Connection failed: ' . $e->getMessage()]
+        ];
+    }
     
     $sourcePath = $config['remote_path'];
     $archivePath = '/Archived';
@@ -749,11 +761,16 @@ function archiveSpecificFiles($config, $fileNames) {
     $errors = [];
     
     foreach ($fileNames as $fileName) {
-        error_log(" Archiving: $fileName");
+        // Trim and clean file name
+        $fileName = trim($fileName);
+        error_log("📦 Archiving: $fileName");
         
         try {
             $sourceFile = rtrim($sourcePath, '/') . '/' . $fileName;
             $destFile = rtrim($archivePath, '/') . '/' . $fileName;
+            
+            error_log("  Source: $sourceFile");
+            error_log("  Destination: $destFile");
             
             // Read file content
             $content = $sftp->getFileContent($sourceFile);
@@ -784,8 +801,14 @@ function archiveSpecificFiles($config, $fileNames) {
             }
             
             // NOW delete from source (only after verified upload)
-            $sftp->deleteFile($sourceFile);
-            error_log("  5. Deleted from source: $sourceFile");
+            try {
+                $sftp->deleteFile($sourceFile);
+                error_log("  5. Deleted from source: $sourceFile");
+            } catch (Exception $deleteEx) {
+                // Log but don't fail - file is already in archive
+                error_log("  ⚠ WARNING: Could not delete source file: " . $deleteEx->getMessage());
+                error_log("  ℹ File successfully archived but remains in source");
+            }
             
             // Clean up temp file
             if (file_exists($tempFile)) {
@@ -793,11 +816,19 @@ function archiveSpecificFiles($config, $fileNames) {
             }
             
             $archived[] = $fileName;
-            error_log("  SUCCESSFULLY ARCHIVED: $fileName");
+            error_log("  ✅ SUCCESSFULLY ARCHIVED: $fileName");
             
         } catch (Exception $e) {
+            $errorDetail = [
+                'file' => $fileName,
+                'error' => $e->getMessage(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString()
+            ];
             $errors[] = "$fileName: " . $e->getMessage();
-            error_log("  ARCHIVE FAILED for $fileName: " . $e->getMessage());
+            error_log("  ❌ ARCHIVE FAILED for $fileName: " . $e->getMessage());
+            error_log("  Error Line: " . $e->getLine());
+            error_log("  Stack Trace: " . $e->getTraceAsString());
             
             // Clean up temp file on error
             if (isset($tempFile) && file_exists($tempFile)) {
@@ -805,7 +836,7 @@ function archiveSpecificFiles($config, $fileNames) {
             }
             
             // CRITICAL: If archive fails, the file stays in source folder for retry
-            error_log("  File remains in source folder for retry");
+            error_log("  ⚠ File remains in source folder for retry");
         }
     }
     
