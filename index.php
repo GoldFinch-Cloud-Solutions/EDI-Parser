@@ -43,18 +43,18 @@ class SFTPConnection {
     }
     
     public function connect() {
-        error_log("🔌 SFTP Connection Method Detection:");
+        error_log(" SFTP Connection Method Detection:");
         
         if (function_exists('curl_init') && $this->checkCurlSFTPSupport()) {
             $this->sftp = 'curl';
-            error_log(" Using cURL SFTP");
+            error_log("   Using cURL SFTP");
             return true;
         }
         elseif (function_exists('ssh2_connect')) {
-            error_log(" Using Native SSH2");
+            error_log("    Using Native SSH2");
             return $this->connectNative();
         } else {
-            error_log(" No SFTP library available");
+            error_log("    No SFTP library available");
             throw new Exception("No SFTP library available");
         }
     }
@@ -253,7 +253,7 @@ class SFTPConnection {
     }
     
     private function deleteFileWithCurl($remoteFile) {
-        error_log("  DELETE OPERATION (cURL method)");
+        error_log("   🗑️  DELETE OPERATION (cURL method)");
         error_log("      File path: $remoteFile");
         
         // CRITICAL FIX: Use a dummy file download operation to enable POSTQUOTE
@@ -293,7 +293,7 @@ class SFTPConnection {
         curl_close($ch);
         
         if ($error) {
-            error_log(" cURL Error: $error (Code: $httpCode)");
+            error_log("      ❌ cURL Error: $error (Code: $httpCode)");
             throw new Exception("SFTP cURL Delete Error: $error (HTTP Code: $httpCode)");
         }
         
@@ -314,7 +314,7 @@ class SFTPConnection {
             
             // If file still exists (code 200), throw error
             if ($verifyCode == 200 || $verifyCode == 0) {
-                error_log("  WARNING: File may still exist after delete (verify code: $verifyCode)");
+                error_log("      ⚠️  WARNING: File may still exist after delete (verify code: $verifyCode)");
                 error_log("      Attempting alternative delete method...");
                 
                 // Try alternative: Use PREQUOTE with rename to .deleted
@@ -322,10 +322,10 @@ class SFTPConnection {
             }
             
         } catch (Exception $e) {
-            error_log("  Verification check failed (expected): " . $e->getMessage());
+            error_log("      ℹ️  Verification check failed (expected): " . $e->getMessage());
         }
         
-        error_log(" Delete command executed and verified");
+        error_log("      ✅ Delete command executed and verified");
         error_log("      Response code: $httpCode");
         
         return true;
@@ -336,7 +336,7 @@ class SFTPConnection {
      * This is more reliable than rm in some SFTP implementations
      */
     private function deleteFileAlternative($remoteFile) {
-        error_log(" Using alternative delete (rename to .deleted)");
+        error_log("      🔄 Using alternative delete (rename to .deleted)");
         
         $pathParts = explode('/', $remoteFile);
         $encodedParts = array_map('rawurlencode', $pathParts);
@@ -365,11 +365,11 @@ class SFTPConnection {
         curl_close($ch);
         
         if ($error) {
-            error_log(" Rename failed: $error");
+            error_log("      ❌ Rename failed: $error");
             throw new Exception("Failed to delete file (both methods): $remoteFile");
         }
         
-        error_log("      File renamed to: $deletedPath");
+        error_log("      ✅ File renamed to: $deletedPath");
         return true;
     }
     
