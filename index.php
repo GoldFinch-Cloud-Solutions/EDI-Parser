@@ -148,7 +148,11 @@ class SFTPConnection {
     }
     
     private function getFileContentWithCurl($remoteFile) {
-        $encodedPath = str_replace(' ', '%20', $remoteFile);
+        // Properly encode the path for URL, but preserve the file structure
+        $pathParts = explode('/', $remoteFile);
+        $encodedParts = array_map('rawurlencode', $pathParts);
+        $encodedPath = implode('/', $encodedParts);
+        
         $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
         
         $ch = curl_init();
@@ -187,7 +191,11 @@ class SFTPConnection {
     }
     
     private function uploadFileWithCurl($localFile, $remoteFile) {
-        $encodedPath = str_replace(' ', '%20', $remoteFile);
+        // Properly encode the path for URL
+        $pathParts = explode('/', $remoteFile);
+        $encodedParts = array_map('rawurlencode', $pathParts);
+        $encodedPath = implode('/', $encodedParts);
+        
         $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
         
         $fp = fopen($localFile, 'r');
@@ -221,8 +229,22 @@ class SFTPConnection {
         if ($this->sftp === 'curl') {
             return $this->deleteFileWithCurl($remoteFile);
         } else {
+            // Use SSH2 SFTP - handles special characters better
             $result = @ssh2_sftp_unlink($this->sftp, $remoteFile);
             if (!$result) {
+                // If SSH2 fails, try using ssh2_exec for more robust delete
+                try {
+                    $command = 'rm -f ' . escapeshellarg($remoteFile);
+                    $stream = @ssh2_exec($this->connection, $command);
+                    if ($stream) {
+                        stream_set_blocking($stream, true);
+                        $output = stream_get_contents($stream);
+                        fclose($stream);
+                        return true;
+                    }
+                } catch (Exception $e) {
+                    throw new Exception("Failed to delete file using SSH2: $remoteFile - " . $e->getMessage());
+                }
                 throw new Exception("Failed to delete file: $remoteFile");
             }
             return true;
@@ -230,22 +252,33 @@ class SFTPConnection {
     }
     
     private function deleteFileWithCurl($remoteFile) {
-        $encodedPath = str_replace(' ', '%20', $remoteFile);
-        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
+        // For files with special characters, we need to properly escape them
+        // Use the base URL without file path in the URL itself
+        $url = sprintf("sftp://%s:%d/", $this->config['host'], $this->config['port']);
+        
+        // Escape the file path properly for the shell command
+        $escapedPath = str_replace('"', '\\"', $remoteFile);
+        $deleteCommand = 'rm "' . $escapedPath . '"';
+        
+        error_log("  DELETE Command: $deleteCommand");
         
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-        curl_setopt($ch, CURLOPT_QUOTE, array('rm ' . $remoteFile));
+        curl_setopt($ch, CURLOPT_QUOTE, array($deleteCommand));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         
         $result = curl_exec($ch);
         $error = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        
         curl_close($ch);
         
         if ($error) {
-            throw new Exception("SFTP cURL Delete Error: $error");
+            error_log("  cURL Delete Error: $error (Code: $httpCode)");
+            throw new Exception("SFTP cURL Delete Error: $error (HTTP Code: $httpCode)");
         }
         
         return true;
@@ -688,14 +721,14 @@ function parseSFTPFilesWithoutArchive($config, $parser) {
             $processedFileNames[] = $fileName;
             $filesProcessed++;
             
-            error_log("  ✅ File parsing complete: $fileName");
+            error_log(" File parsing complete: $fileName");
             
         } catch (Exception $e) {
             $fileErrors[] = [
                 'file' => $fileName,
                 'error' => $e->getMessage()
             ];
-            error_log("  ❌ Parsing FAILED for $fileName: " . $e->getMessage());
+            error_log("  Parsing FAILED for $fileName: " . $e->getMessage());
         }
     }
     
@@ -742,9 +775,9 @@ function archiveSpecificFiles($config, $fileNames) {
     try {
         $sftp = new SFTPConnection($config);
         $sftp->connect();
-        error_log("✅ SFTP Connected for archiving");
+        error_log("SFTP Connected for archiving");
     } catch (Exception $e) {
-        error_log("❌ SFTP Connection failed: " . $e->getMessage());
+        error_log(" SFTP Connection failed: " . $e->getMessage());
         return [
             'success' => false,
             'archivedCount' => 0,
@@ -763,7 +796,7 @@ function archiveSpecificFiles($config, $fileNames) {
     foreach ($fileNames as $fileName) {
         // Trim and clean file name
         $fileName = trim($fileName);
-        error_log("📦 Archiving: $fileName");
+        error_log("Archiving: $fileName");
         
         try {
             $sourceFile = rtrim($sourcePath, '/') . '/' . $fileName;
@@ -806,7 +839,7 @@ function archiveSpecificFiles($config, $fileNames) {
                 error_log("  5. Deleted from source: $sourceFile");
             } catch (Exception $deleteEx) {
                 // Log but don't fail - file is already in archive
-                error_log("  ⚠ WARNING: Could not delete source file: " . $deleteEx->getMessage());
+                error_log("   WARNING: Could not delete source file: " . $deleteEx->getMessage());
                 error_log("  ℹ File successfully archived but remains in source");
             }
             
@@ -816,7 +849,7 @@ function archiveSpecificFiles($config, $fileNames) {
             }
             
             $archived[] = $fileName;
-            error_log("  ✅ SUCCESSFULLY ARCHIVED: $fileName");
+            error_log("  SUCCESSFULLY ARCHIVED: $fileName");
             
         } catch (Exception $e) {
             $errorDetail = [
@@ -826,7 +859,7 @@ function archiveSpecificFiles($config, $fileNames) {
                 'trace' => $e->getTraceAsString()
             ];
             $errors[] = "$fileName: " . $e->getMessage();
-            error_log("  ❌ ARCHIVE FAILED for $fileName: " . $e->getMessage());
+            error_log("   ARCHIVE FAILED for $fileName: " . $e->getMessage());
             error_log("  Error Line: " . $e->getLine());
             error_log("  Stack Trace: " . $e->getTraceAsString());
             
