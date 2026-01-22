@@ -372,7 +372,7 @@ class SFTPConnection {
     public function deleteFile($remoteFile) {
         if ($this->sftp === 'curl') {
             // cURL delete using CURLOPT_QUOTE with RM command
-            $encodedPath = str_replace(' ', '%20', $remoteFile);
+            // Note: Use the raw path for the rm command, not URL-encoded
             $url = sprintf(
                 "sftp://%s:%d/",
                 $this->config['host'],
@@ -382,7 +382,7 @@ class SFTPConnection {
             $ch = curl_init();
             curl_setopt($ch, CURLOPT_URL, $url);
             curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-            curl_setopt($ch, CURLOPT_QUOTE, array("rm " . $encodedPath));
+            curl_setopt($ch, CURLOPT_QUOTE, array("rm " . $remoteFile));
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
             curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
             
@@ -602,5 +602,6 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
+
 
 
