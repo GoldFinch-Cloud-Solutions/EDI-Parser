@@ -487,7 +487,7 @@ try {
             echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         }
         // Download raw XML file from SFTP
-        elseif (isset($_GET['file'])) {
+        elseif (isset($_GET['file']) && !isset($_GET['action'])) {
             $fileName = $_GET['file'];
             
             // Security: prevent directory traversal
@@ -602,4 +602,5 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
+
 
