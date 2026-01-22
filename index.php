@@ -3,10 +3,10 @@
  * WooCommerce Orders XML File API
  * 
  * Usage: 
- * GET  /parse_orders_api.php?action=listSftp             (List files on SFTP server)
- * GET  /parse_orders_api.php?file=wc-orders.xml          (Download raw XML file from SFTP)
- * GET  /parse_orders_api.php?action=archive&file=wc-orders.xml  (Copy file to Archived subfolder)
- * GET  /parse_orders_api.php?action=delete&file=wc-orders.xml   (Delete file from main folder)
+ * GET  /index.php?action=listSftp             (List files on SFTP server)
+ * GET  /index.php?file=wc-orders.xml          (Download raw XML file from SFTP)
+ * GET  /index.php?action=archive&file=wc-orders.xml  (Copy file to Archived subfolder)
+ * GET  /index.php?action=delete&file=wc-orders.xml   (Delete file from main folder)
  */
 
 header('Content-Type: application/json');
@@ -602,3 +602,4 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
+
