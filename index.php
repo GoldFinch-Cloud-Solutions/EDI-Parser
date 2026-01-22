@@ -1,14 +1,12 @@
 <?php
 /**
- * WooCommerce Orders XML Parser API - COMPLETE DUAL FORMAT SUPPORT
- * Supports both Excel XML and Lingo XML formats
+ * WooCommerce Orders XML File API
  * 
- * Version: 3.1 - FIXED DELETE OPERATION
- * Last Updated: January 2026
- * 
- * ENDPOINTS:
- * - GET  ?action=parseSftp   → Parse XML files (does NOT archive)
- * - POST action=archiveFiles → Archive specific files after Salesforce processing
+ * Usage: 
+ * GET  /parse_orders_api.php?action=listSftp             (List files on SFTP server)
+ * GET  /parse_orders_api.php?file=wc-orders.xml          (Download raw XML file from SFTP)
+ * GET  /parse_orders_api.php?action=archive&file=wc-orders.xml  (Copy file to Archived subfolder)
+ * GET  /parse_orders_api.php?action=delete&file=wc-orders.xml   (Delete file from main folder)
  */
 
 header('Content-Type: application/json');
@@ -16,12 +14,15 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
+// Handle OPTIONS request for CORS
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
-// SFTP Configuration
+// ============================================
+// SFTP Configuration (Username/Password Authentication)
+// ============================================
 $SFTP_CONFIG = [
     'host' => $_SERVER['HTTP_SFTP_HOST'] ?? getenv('SFTP_HOST'),
     'port' => $_SERVER['HTTP_SFTP_PORT'] ?? getenv('SFTP_PORT') ?: 22,
@@ -29,6 +30,7 @@ $SFTP_CONFIG = [
     'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD'),
     'remote_path' => getenv('SFTP_REMOTE_PATH') ?: '/EDI850_Orders'
 ];
+
 
 /**
  * SFTP Connection Class
@@ -42,72 +44,165 @@ class SFTPConnection {
         $this->config = $config;
     }
     
+    /**
+     * Connect to SFTP server using phpseclib, cURL, or native SSH2
+     */
     public function connect() {
-        error_log("🔌 SFTP Connection Method Detection:");
-        
-        if (function_exists('curl_init') && $this->checkCurlSFTPSupport()) {
-            $this->sftp = 'curl';
-            error_log("   ✅ Using cURL SFTP");
-            return true;
+        // Try phpseclib first (most reliable)
+        if (class_exists('phpseclib3\Net\SFTP')) {
+            return $this->connectPhpseclib3();
+        } elseif (class_exists('phpseclib\Net\SFTP')) {
+            return $this->connectPhpseclib2();
+        } 
+        // Try cURL with SFTP support
+        elseif (function_exists('curl_init') && $this->checkCurlSFTPSupport()) {
+            return $this->connectCurl();
         }
+        // Try native SSH2 extension
         elseif (function_exists('ssh2_connect')) {
-            error_log("   ✅ Using Native SSH2");
             return $this->connectNative();
         } else {
-            error_log("   ❌ No SFTP library available");
-            throw new Exception("No SFTP library available");
+            throw new Exception("No SFTP library available. Install phpseclib (composer require phpseclib/phpseclib) or enable cURL with SFTP support or SSH2 extension");
         }
     }
     
+    /**
+     * Check if cURL supports SFTP protocol
+     */
     private function checkCurlSFTPSupport() {
-        if (!function_exists('curl_version')) return false;
+        if (!function_exists('curl_version')) {
+            return false;
+        }
         $curlInfo = curl_version();
         return in_array('sftp', $curlInfo['protocols']);
     }
     
-    private function connectNative() {
-        $this->connection = ssh2_connect($this->config['host'], $this->config['port']);
-        if (!$this->connection) throw new Exception("Failed to connect to SFTP server");
-        if (!ssh2_auth_password($this->connection, $this->config['username'], $this->config['password'])) {
-            throw new Exception("SFTP authentication failed");
-        }
-        $this->sftp = ssh2_sftp($this->connection);
-        if (!$this->sftp) throw new Exception("Failed to initialize SFTP subsystem");
+    /**
+     * Connect using cURL (no connection needed, just mark as connected)
+     */
+    private function connectCurl() {
+        $this->sftp = 'curl'; // Mark as using curl
         return true;
     }
     
+    /**
+     * Connect using phpseclib v3
+     */
+    private function connectPhpseclib3() {
+        $this->sftp = new \phpseclib3\Net\SFTP($this->config['host'], $this->config['port']);
+        
+        if (!$this->sftp->login($this->config['username'], $this->config['password'])) {
+            throw new Exception("SFTP login failed with password");
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Connect using phpseclib v2
+     */
+    private function connectPhpseclib2() {
+        $this->sftp = new \phpseclib\Net\SFTP($this->config['host'], $this->config['port']);
+        
+        if (!$this->sftp->login($this->config['username'], $this->config['password'])) {
+            throw new Exception("SFTP login failed with password");
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Connect using native SSH2 extension
+     */
+    private function connectNative() {
+        $this->connection = ssh2_connect($this->config['host'], $this->config['port']);
+        
+        if (!$this->connection) {
+            throw new Exception("Failed to connect to SFTP server");
+        }
+        
+        if (!ssh2_auth_password($this->connection, $this->config['username'], $this->config['password'])) {
+            throw new Exception("SFTP authentication failed with password");
+        }
+        
+        $this->sftp = ssh2_sftp($this->connection);
+        if (!$this->sftp) {
+            throw new Exception("Failed to initialize SFTP subsystem");
+        }
+        
+        return true;
+    }
+    
+    /**
+     * List files in remote directory
+     */
     public function listFiles($remotePath) {
         $files = [];
         
         if ($this->sftp === 'curl') {
+            // Using cURL
             return $this->listFilesWithCurl($remotePath);
-        } else {
-            $handle = @opendir("ssh2.sftp://{$this->sftp}" . $remotePath);
-            if (!$handle) {
-                throw new Exception("Failed to open directory: $remotePath");
-            }
+        }
+        elseif (is_object($this->sftp)) {
+            // Using phpseclib
+            $fileList = $this->sftp->nlist($remotePath);
             
-            while (false !== ($file = readdir($handle))) {
-                if ($file === '.' || $file === '..') continue;
+            foreach ($fileList as $file) {
+                if ($file === '.' || $file === '..') {
+                    continue;
+                }
+                
+                $fullPath = rtrim($remotePath, '/') . '/' . $file;
+                $stat = $this->sftp->stat($fullPath);
+                
                 if (preg_match('/\.xml$/i', $file)) {
-                    $fullPath = rtrim($remotePath, '/') . '/' . $file;
-                    $sftpPath = "ssh2.sftp://{$this->sftp}" . $fullPath;
                     $files[] = [
                         'filename' => $file,
                         'path' => $fullPath,
-                        'size' => @filesize($sftpPath) ?: 0,
-                        'modified' => @filemtime($sftpPath) ? date('Y-m-d H:i:s', filemtime($sftpPath)) : null
+                        'size' => $stat['size'] ?? 0,
+                        'modified' => isset($stat['mtime']) ? date('Y-m-d H:i:s', $stat['mtime']) : null
+                    ];
+                }
+            }
+        } else {
+            // Using native SSH2
+            $handle = opendir("ssh2.sftp://{$this->sftp}" . $remotePath);
+            
+            while (false !== ($file = readdir($handle))) {
+                if ($file === '.' || $file === '..') {
+                    continue;
+                }
+                
+                if (preg_match('/\.xml$/i', $file)) {
+                    $fullPath = rtrim($remotePath, '/') . '/' . $file;
+                    $sftpPath = "ssh2.sftp://{$this->sftp}" . $fullPath;
+                    
+                    $files[] = [
+                        'filename' => $file,
+                        'path' => $fullPath,
+                        'size' => filesize($sftpPath),
+                        'modified' => date('Y-m-d H:i:s', filemtime($sftpPath))
                     ];
                 }
             }
             closedir($handle);
         }
+        
         return $files;
     }
     
+    /**
+     * List files using cURL
+     */
     private function listFilesWithCurl($remotePath) {
+        // Properly encode path and construct URL
         $encodedPath = str_replace(' ', '%20', rtrim($remotePath, '/'));
-        $url = sprintf("sftp://%s:%d%s/", $this->config['host'], $this->config['port'], $encodedPath);
+        $url = sprintf(
+            "sftp://%s:%d%s/",
+            $this->config['host'],
+            $this->config['port'],
+            $encodedPath
+        );
         
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
@@ -121,43 +216,57 @@ class SFTPConnection {
         $error = curl_error($ch);
         curl_close($ch);
         
-        if ($error) throw new Exception("SFTP cURL Error: $error");
+        if ($error) {
+            throw new Exception("SFTP cURL Error: $error");
+        }
         
         $files = [];
         $fileNames = array_filter(explode("\n", trim($fileList)));
+        
         foreach ($fileNames as $file) {
-            $file = trim($file);
             if (preg_match('/\.xml$/i', $file)) {
+                $fullPath = rtrim($remotePath, '/') . '/' . $file;
                 $files[] = [
                     'filename' => $file,
-                    'path' => rtrim($remotePath, '/') . '/' . $file,
-                    'size' => 0,
+                    'path' => $fullPath,
+                    'size' => 0, // cURL DIRLISTONLY doesn't provide size
                     'modified' => null
                 ];
             }
         }
+        
         return $files;
     }
     
-    public function getFileContent($remoteFile) {
+    /**
+     * Download file from SFTP
+     */
+    public function downloadFile($remoteFile, $localFile) {
         if ($this->sftp === 'curl') {
-            return $this->getFileContentWithCurl($remoteFile);
+            // Using cURL
+            return $this->downloadFileWithCurl($remoteFile, $localFile);
+        }
+        elseif (is_object($this->sftp)) {
+            // Using phpseclib
+            return $this->sftp->get($remoteFile, $localFile);
         } else {
-            $sftpPath = "ssh2.sftp://{$this->sftp}" . $remoteFile;
-            $content = @file_get_contents($sftpPath);
-            if ($content === false) {
-                throw new Exception("Failed to read file: $remoteFile");
-            }
-            return $content;
+            // Using native SSH2
+            return ssh2_scp_recv($this->connection, $remoteFile, $localFile);
         }
     }
     
-    private function getFileContentWithCurl($remoteFile) {
-        $pathParts = explode('/', $remoteFile);
-        $encodedParts = array_map('rawurlencode', $pathParts);
-        $encodedPath = implode('/', $encodedParts);
-        
-        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
+    /**
+     * Download file using cURL
+     */
+    private function downloadFileWithCurl($remoteFile, $localFile) {
+        // Properly encode path and construct URL
+        $encodedPath = str_replace(' ', '%20', $remoteFile);
+        $url = sprintf(
+            "sftp://%s:%d%s",
+            $this->config['host'],
+            $this->config['port'],
+            $encodedPath
+        );
         
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
@@ -170,767 +279,326 @@ class SFTPConnection {
         $error = curl_error($ch);
         curl_close($ch);
         
-        if ($error) throw new Exception("SFTP cURL Error: $error");
-        return $content;
+        if ($error) {
+            throw new Exception("SFTP cURL Error: $error");
+        }
+        
+        return file_put_contents($localFile, $content) !== false;
     }
-
-    public function uploadFile($localFile, $remoteFile) {
+    
+    /**
+     * Get file content as string
+     */
+    public function getFileContent($remoteFile) {
         if ($this->sftp === 'curl') {
-            return $this->uploadFileWithCurl($localFile, $remoteFile);
+            // Using cURL
+            return $this->getFileContentWithCurl($remoteFile);
+        }
+        elseif (is_object($this->sftp)) {
+            // Using phpseclib
+            return $this->sftp->get($remoteFile);
         } else {
-            $stream = @fopen("ssh2.sftp://{$this->sftp}" . $remoteFile, 'w');
-            if (!$stream) {
-                throw new Exception("Failed to open remote file for writing: $remoteFile");
-            }
-            
-            $data = file_get_contents($localFile);
-            if (fwrite($stream, $data) === false) {
-                fclose($stream);
-                throw new Exception("Failed to write to remote file: $remoteFile");
-            }
-            
-            fclose($stream);
-            return true;
+            // Using native SSH2
+            $sftpPath = "ssh2.sftp://{$this->sftp}" . $remoteFile;
+            return file_get_contents($sftpPath);
         }
     }
     
-    private function uploadFileWithCurl($localFile, $remoteFile) {
-        $pathParts = explode('/', $remoteFile);
-        $encodedParts = array_map('rawurlencode', $pathParts);
-        $encodedPath = implode('/', $encodedParts);
-        
-        $url = sprintf("sftp://%s:%d%s", $this->config['host'], $this->config['port'], $encodedPath);
-        
-        $fp = fopen($localFile, 'r');
-        if (!$fp) {
-            throw new Exception("Failed to open local file: $localFile");
-        }
+    /**
+     * Get file content using cURL
+     */
+    private function getFileContentWithCurl($remoteFile) {
+        // Properly encode path and construct URL
+        $encodedPath = str_replace(' ', '%20', $remoteFile);
+        $url = sprintf(
+            "sftp://%s:%d%s",
+            $this->config['host'],
+            $this->config['port'],
+            $encodedPath
+        );
         
         $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        
+        $content = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($error) {
+            throw new Exception("SFTP cURL Error: $error");
+        }
+        
+        return $content;
+    }
+    
+    /**
+     * Copy file on SFTP server
+     */
+    public function copyFile($sourceFile, $destFile) {
+        if ($this->sftp === 'curl') {
+            // cURL doesn't support direct copy, so download and upload
+            $content = $this->getFileContentWithCurl($sourceFile);
+            if ($content === false) {
+                throw new Exception("Failed to read source file: $sourceFile");
+            }
+            return $this->uploadFileWithCurl($destFile, $content);
+        }
+        elseif (is_object($this->sftp)) {
+            // Using phpseclib - get content and put to new location
+            $content = $this->sftp->get($sourceFile);
+            if ($content === false) {
+                throw new Exception("Failed to read source file: $sourceFile");
+            }
+            return $this->sftp->put($destFile, $content);
+        } else {
+            // Using native SSH2
+            $sftpPath = "ssh2.sftp://{$this->sftp}" . $sourceFile;
+            $content = file_get_contents($sftpPath);
+            if ($content === false) {
+                throw new Exception("Failed to read source file: $sourceFile");
+            }
+            $destPath = "ssh2.sftp://{$this->sftp}" . $destFile;
+            return file_put_contents($destPath, $content) !== false;
+        }
+    }
+    
+    /**
+     * Delete file from SFTP server
+     */
+    public function deleteFile($remoteFile) {
+        if ($this->sftp === 'curl') {
+            // cURL delete using CURLOPT_QUOTE with RM command
+            $encodedPath = str_replace(' ', '%20', $remoteFile);
+            $url = sprintf(
+                "sftp://%s:%d/",
+                $this->config['host'],
+                $this->config['port']
+            );
+            
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+            curl_setopt($ch, CURLOPT_QUOTE, array("rm " . $encodedPath));
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+            
+            $result = curl_exec($ch);
+            $error = curl_error($ch);
+            curl_close($ch);
+            
+            if ($error) {
+                throw new Exception("SFTP cURL Error: $error");
+            }
+            
+            return true;
+        }
+        elseif (is_object($this->sftp)) {
+            // Using phpseclib
+            return $this->sftp->delete($remoteFile);
+        } else {
+            // Using native SSH2
+            return ssh2_sftp_unlink($this->sftp, $remoteFile);
+        }
+    }
+    
+    /**
+     * Upload file content using cURL
+     */
+    private function uploadFileWithCurl($remoteFile, $content) {
+        $encodedPath = str_replace(' ', '%20', $remoteFile);
+        $url = sprintf(
+            "sftp://%s:%d%s",
+            $this->config['host'],
+            $this->config['port'],
+            $encodedPath
+        );
+        
+        $ch = curl_init();
+        $stream = fopen('php://temp', 'r+');
+        fwrite($stream, $content);
+        rewind($stream);
+        
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
         curl_setopt($ch, CURLOPT_UPLOAD, true);
-        curl_setopt($ch, CURLOPT_INFILE, $fp);
-        curl_setopt($ch, CURLOPT_INFILESIZE, filesize($localFile));
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-        
-        $result = curl_exec($ch);
-        $error = curl_error($ch);
-        
-        fclose($fp);
-        curl_close($ch);
-        
-        if ($error) {
-            throw new Exception("SFTP cURL Upload Error: $error");
-        }
-        
-        return true;
-    }
-
-    public function deleteFile($remoteFile) {
-        if ($this->sftp === 'curl') {
-            return $this->deleteFileWithCurl($remoteFile);
-        } else {
-            // Native SSH2 method
-            $result = @ssh2_sftp_unlink($this->sftp, $remoteFile);
-            if (!$result) {
-                // Fallback to exec
-                $command = 'rm -f ' . escapeshellarg($remoteFile);
-                $stream = @ssh2_exec($this->connection, $command);
-                if ($stream) {
-                    stream_set_blocking($stream, true);
-                    fclose($stream);
-                    return true;
-                }
-                throw new Exception("Failed to delete file: $remoteFile");
-            }
-            return true;
-        }
-    }
-    
-    private function deleteFileWithCurl($remoteFile) {
-        error_log("     DELETE via cURL SFTP");
-        error_log("      File: $remoteFile");
-        
-        $url = sprintf("sftp://%s:%d/", $this->config['host'], $this->config['port']);
-        
-        // Simple SFTP delete command
-        $deleteCommand = 'rm ' . $remoteFile;
-        
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-        curl_setopt($ch, CURLOPT_QUOTE, array($deleteCommand)); // QUOTE, not POSTQUOTE!
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_NOBODY, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-        
-        $result = curl_exec($ch);
-        $error = curl_error($ch);
-        curl_close($ch);
-        
-        if ($error) {
-            error_log("        Delete failed, trying rename: $error");
-            return $this->deleteFileAlternative($remoteFile);
-        }
-        
-        error_log("       File deleted");
-        return true;
-    }
-    
-    private function deleteFileAlternative($remoteFile) {
-        error_log("      Alternative: Rename to .deleted");
-        
-        $url = sprintf("sftp://%s:%d/", $this->config['host'], $this->config['port']);
-        $deletedPath = $remoteFile . '.deleted.' . time();
-        $renameCommand = 'rename ' . $remoteFile . ' ' . $deletedPath;
-        
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-        curl_setopt($ch, CURLOPT_QUOTE, array($renameCommand));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_NOBODY, true);
+        curl_setopt($ch, CURLOPT_INFILE, $stream);
+        curl_setopt($ch, CURLOPT_INFILESIZE, strlen($content));
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         
         $result = curl_exec($ch);
         $error = curl_error($ch);
         curl_close($ch);
+        fclose($stream);
         
         if ($error) {
-            throw new Exception("Failed to delete file (both methods): $error");
+            throw new Exception("SFTP cURL Error: $error");
         }
         
-        error_log("       Renamed to: $deletedPath");
         return true;
     }
     
+    /**
+     * Disconnect
+     */
     public function disconnect() {
         if ($this->sftp === 'curl') {
+            // cURL doesn't maintain persistent connections
             $this->sftp = null;
+        }
+        elseif (is_object($this->sftp)) {
+            $this->sftp->disconnect();
         }
         $this->connection = null;
         $this->sftp = null;
     }
 }
 
-/**
- * COMPLETE DUAL FORMAT ORDER PARSER
- */
-class OrderXMLParser {
-    private $headers = [];
-    private $orders = [];
-    
-    public function parseFile($filePath) {
-        if (!file_exists($filePath)) {
-            throw new Exception("File not found: $filePath");
-        }
-        $xmlContent = file_get_contents($filePath);
-        return $this->parseXML($xmlContent);
-    }
-    
-    public function parseXML($xmlContent) {
-        if (strpos($xmlContent, '<Workbook') !== false) {
-            return $this->parseExcelXML($xmlContent);
-        } 
-        elseif (strpos($xmlContent, '<File>') !== false || strpos($xmlContent, '<Document>') !== false) {
-            return $this->parseLingoXML($xmlContent);
-        } 
-        else {
-            throw new Exception("Unsupported XML format. Expected Excel XML or Lingo XML.");
-        }
-    }
-    
-    private function parseExcelXML($xmlContent) {
-        $xml = simplexml_load_string($xmlContent);
-        if ($xml === false) throw new Exception("Failed to parse Excel XML");
-        
-        $xml->registerXPathNamespace('ss', 'urn:schemas-microsoft-com:office:spreadsheet');
-        $rows = $xml->xpath('//ss:Row');
-        if (empty($rows)) throw new Exception("No rows found in Excel XML");
-        
-        $this->parseExcelHeaders($rows[0]);
-        $this->parseExcelDataRows(array_slice($rows, 1));
-        
-        return [
-            'success' => true,
-            'format' => 'Excel XML',
-            'totalOrders' => count($this->orders),
-            'totalLineItems' => $this->getTotalLineItems(),
-            'orders' => array_values($this->orders)
-        ];
-    }
-    
-    private function parseLingoXML($xmlContent) {
-        $xml = simplexml_load_string($xmlContent);
-        if ($xml === false) throw new Exception("Failed to parse Lingo XML");
-        
-        $orders = [];
-        
-        foreach ($xml->Document as $document) {
-            $order = [
-                'documentId' => (string)$document->InternalDocumentNumber ?: (string)$document->InternalOrderNumber,
-                'companyCode' => (string)$document->CompanyCode,
-                'customerNo' => (string)$document->CustomerNumber,
-                'poNumber' => (string)$document->PurchaseOrderNumber,
-                'vendorNo' => '',
-                'poDate' => $this->formatLingoDate((string)$document->PurchaseOrderDate),
-                'shipDateOrder' => '',
-                'cancelDate' => '',
-                'orderAmount' => 0,
-                'orderCases' => 0,
-                'orderWeight' => 0,
-                'methodOfPayment' => '',
-                'billTo' => [],
-                'shipTo' => [],
-                'shipFrom' => [],
-                'terms' => [],
-                'lineItems' => []
-            ];
-            
-            if (isset($document->Header)) {
-                $header = $document->Header;
-                $order['poDate'] = $this->formatLingoDate((string)$header->PurchaseOrderDate) ?: $order['poDate'];
-                $order['vendorNo'] = (string)$header->VendorNumber;
-                
-                if (isset($header->OrderTotals)) {
-                    $order['orderAmount'] = (float)$header->OrderTotals->TotalAmount;
-                    if (isset($header->OrderTotals->Weight->UOM->Quantity)) {
-                        $order['orderWeight'] = (float)$header->OrderTotals->Weight->UOM->Quantity;
-                    }
-                    if (isset($header->OrderTotals->Cartons->UOM->Quantity)) {
-                        $order['orderCases'] = (int)$header->OrderTotals->Cartons->UOM->Quantity;
-                    }
-                }
-                
-                foreach ($header->DateLoop as $dateLoop) {
-                    $qualifier = (string)$dateLoop->DateQualifier;
-                    $date = $this->formatLingoDate((string)$dateLoop->Date);
-                    
-                    switch ($qualifier) {
-                        case '004':
-                            $order['poDate'] = $date;
-                            break;
-                        case '010':
-                        case '011':
-                            $order['shipDateOrder'] = $date;
-                            break;
-                        case '001':
-                            $order['cancelDate'] = $date;
-                            break;
-                    }
-                }
-            }
-            
-            foreach ($document->n as $address) {
-                $code = (string)$address->BillAndShipToCode;
-                $addressData = [
-                    'storeNumber' => (string)$address->DUNSOrLocationNumber,
-                    'companyName1' => (string)$address->CompanyName,
-                    'companyName2' => '',
-                    'address1' => (string)$address->Address,
-                    'address2' => '',
-                    'address3' => '',
-                    'city' => (string)$address->City,
-                    'state' => (string)$address->State,
-                    'zip' => (string)$address->Zip,
-                    'country' => (string)$address->Country
-                ];
-                
-                switch ($code) {
-                    case 'BT':
-                        $order['billTo'] = $addressData;
-                        break;
-                    case 'ST':
-                        $order['shipTo'] = $addressData;
-                        break;
-                    case 'SF':
-                        $order['shipFrom'] = $addressData;
-                        break;
-                }
-            }
-            
-            $lineNo = 1;
-            foreach ($document->Detail as $detail) {
-                $lineItem = $detail->DetailLine;
-                
-                $vendorItemNo = '';
-                $upcCode = '';
-                foreach ($lineItem->ItemIds as $itemId) {
-                    $qualifier = (string)$itemId->IdQualifier;
-                    $id = (string)$itemId->Id;
-                    if ($qualifier === 'UP') {
-                        $vendorItemNo = $id;
-                        $upcCode = $id;
-                    }
-                }
-                
-                $quantity = 0;
-                $uom = '';
-                foreach ($lineItem->Quantities as $qty) {
-                    $qualifier = (string)$qty->QtyQualifier;
-                    if ($qualifier === '01' || $qualifier === '38') {
-                        $quantity = (int)$qty->Qty;
-                        $uom = (string)$qty->QtyUOM;
-                        break;
-                    }
-                }
-                
-                $unitPrice = 0;
-                if (isset($lineItem->PriceCost)) {
-                    $unitPrice = (float)$lineItem->PriceCost->PriceOrCost;
-                }
-                
-                $item = [
-                    'lineNo' => str_pad((string)$lineItem->CustomerLineNumber ?: $lineNo, 4, '0', STR_PAD_LEFT),
-                    'vendorItemNo' => $vendorItemNo,
-                    'upcCode' => $upcCode,
-                    'customerItem' => '',
-                    'quantityOrdered' => $quantity,
-                    'unitMeasure' => $uom,
-                    'unitPrice' => $unitPrice,
-                    'originalPrice' => $unitPrice,
-                    'sellingPrice' => $unitPrice,
-                    'lineTotal' => $unitPrice * $quantity,
-                    'packSize' => (string)$lineItem->PackSize,
-                    'itemDesc' => (string)$lineItem->ItemDescription,
-                    'itemDesc2' => '',
-                    'gtin' => '',
-                    'sku' => '',
-                    'upcCaseCode' => '',
-                    'countryOfOrigin' => '',
-                    'shipDateDetail' => ''
-                ];
-                
-                $order['lineItems'][] = $item;
-                $lineNo++;
-            }
-            
-            if (isset($document->Term)) {
-                $order['terms'] = [
-                    'termType' => (string)$document->Term->TermsType,
-                    'basis' => (string)$document->Term->TermsBasis,
-                    'dueDays' => '',
-                    'netDays' => (int)$document->Term->NetDueDays,
-                    'discountPercent' => (float)$document->Term->DiscountPercent
-                ];
-            }
-            
-            $orders[] = $order;
-        }
-        
-        $totalLineItems = 0;
-        foreach ($orders as $order) {
-            $totalLineItems += count($order['lineItems']);
-        }
-        
-        return [
-            'success' => true,
-            'format' => 'Lingo XML',
-            'totalOrders' => count($orders),
-            'totalLineItems' => $totalLineItems,
-            'orders' => $orders
-        ];
-    }
-    
-    private function formatLingoDate($dateStr) {
-        if (empty($dateStr)) return '';
-        if (preg_match('/^\d{1,2}\/\d{1,2}\/\d{4}$/', $dateStr)) {
-            return $dateStr;
-        }
-        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $dateStr, $matches)) {
-            return intval($matches[2]) . '/' . intval($matches[3]) . '/' . $matches[1];
-        }
-        return $dateStr;
-    }
-    
-    private function parseExcelHeaders($headerRow) {
-        $dataCells = $headerRow->xpath('.//ss:Data');
-        if (empty($dataCells)) throw new Exception("No header data found");
-        $headerString = (string)$dataCells[0];
-        $this->headers = explode('|', $headerString);
-    }
-    
-    private function parseExcelDataRows($dataRows) {
-        $orderGroups = [];
-        
-        foreach ($dataRows as $row) {
-            $dataCells = $row->xpath('.//ss:Data');
-            $fullRowData = '';
-            foreach ($dataCells as $cell) {
-                $fullRowData .= (string)$cell;
-            }
-            $values = explode('|', $fullRowData);
-            
-            $lineItem = [];
-            for ($i = 0; $i < count($this->headers) && $i < count($values); $i++) {
-                $lineItem[$this->headers[$i]] = $values[$i];
-            }
-            
-            $orderId = $lineItem['DocumentID'] . '-' . $lineItem['PoNumber'];
-            
-            if (!isset($orderGroups[$orderId])) {
-                $orderGroups[$orderId] = [
-                    'documentId' => $lineItem['DocumentID'],
-                    'companyCode' => $lineItem['CompanyCode'],
-                    'customerNo' => $lineItem['CustomerNo'],
-                    'poNumber' => $lineItem['PoNumber'],
-                    'vendorNo' => $lineItem['VendorNo'],
-                    'poDate' => $lineItem['PoDate'],
-                    'shipDateOrder' => $lineItem['ShipDateOrder'],
-                    'cancelDate' => $lineItem['CancelDate'],
-                    'orderAmount' => floatval($lineItem['OrderAmount']),
-                    'orderCases' => intval($lineItem['OrderCases']),
-                    'orderWeight' => floatval($lineItem['OrderWeight']),
-                    'methodOfPayment' => $lineItem['MethodOfPayment'],
-                    'billTo' => [
-                        'storeNumber' => $lineItem['BT_StoreNumber'],
-                        'companyName1' => $lineItem['BT_CompanyName1'],
-                        'companyName2' => $lineItem['BT_CompanyName2'],
-                        'address1' => $lineItem['BT_Address1'],
-                        'address2' => $lineItem['BT_Address2'],
-                        'address3' => $lineItem['BT_Address3'],
-                        'city' => $lineItem['BT_City'],
-                        'state' => $lineItem['BT_State'],
-                        'zip' => $lineItem['BT_Zip'],
-                        'country' => $lineItem['BT_Country']
-                    ],
-                    'shipTo' => [
-                        'storeNumber' => $lineItem['ST_StoreNumber'],
-                        'companyName1' => $lineItem['ST_CompanyName1'],
-                        'companyName2' => $lineItem['ST_CompanyName2'],
-                        'address1' => $lineItem['ST_Address1'],
-                        'address2' => $lineItem['ST_Address2'],
-                        'address3' => $lineItem['ST_Address3'],
-                        'city' => $lineItem['ST_City'],
-                        'state' => $lineItem['ST_State'],
-                        'zip' => $lineItem['ST_Zip'],
-                        'country' => $lineItem['ST_Country']
-                    ],
-                    'shipFrom' => [
-                        'companyName1' => $lineItem['SF_CompanyName1'],
-                        'companyName2' => $lineItem['SF_CompanyName2'],
-                        'address1' => $lineItem['SF_Address1'],
-                        'city' => $lineItem['SF_City'],
-                        'state' => $lineItem['SF_State'],
-                        'zip' => $lineItem['SF_Zip'],
-                        'country' => $lineItem['SF_Country']
-                    ],
-                    'terms' => [
-                        'termType' => $lineItem['TermsType'],
-                        'basis' => $lineItem['TermsBasis'],
-                        'dueDays' => $lineItem['DueDays'],
-                        'netDays' => intval($lineItem['NetDays']),
-                        'discountPercent' => intval($lineItem['DiscountPercent'])
-                    ],
-                    'lineItems' => []
-                ];
-            }
-            
-            $orderGroups[$orderId]['lineItems'][] = [
-                'lineNo' => $lineItem['CustomerLine'],
-                'vendorItemNo' => $lineItem['VendorItemNo'],
-                'upcCode' => $lineItem['UPCCode'],
-                'customerItem' => $lineItem['CustomerItem'],
-                'quantityOrdered' => intval($lineItem['QuantityOrdered']),
-                'unitMeasure' => $lineItem['UnitMeasure'],
-                'unitPrice' => floatval($lineItem['UnitPrice']),
-                'originalPrice' => floatval($lineItem['OriginalPrice']),
-                'sellingPrice' => floatval($lineItem['SellingPrice']),
-                'lineTotal' => floatval($lineItem['UnitPrice']) * intval($lineItem['QuantityOrdered']),
-                'packSize' => $lineItem['PackSize'],
-                'itemDesc' => $lineItem['ItemDesc'],
-                'itemDesc2' => $lineItem['ItemDesc2'],
-                'gtin' => $lineItem['GTIN'],
-                'sku' => $lineItem['SKU'],
-                'upcCaseCode' => $lineItem['UPCCaseCode'],
-                'countryOfOrigin' => $lineItem['CountryOfOrigin'],
-                'shipDateDetail' => $lineItem['ShipDateDetail']
-            ];
-        }
-        
-        $this->orders = $orderGroups;
-    }
-    
-    private function getTotalLineItems() {
-        $total = 0;
-        foreach ($this->orders as $order) {
-            $total += count($order['lineItems']);
-        }
-        return $total;
-    }
-}
-
-function parseSFTPFilesWithoutArchive($config, $parser) {
-    error_log("=== EDI 850 ORDER PARSING STARTED (NO ARCHIVE) ===");
-    
-    $sftp = new SFTPConnection($config);
-    $sftp->connect();
-    
-    error_log("SFTP Connected: " . $config['host']);
-    
-    $files = $sftp->listFiles($config['remote_path']);
-    error_log("Files found: " . count($files));
-    
-    if (empty($files)) {
-        $sftp->disconnect();
-        return [
-            'success' => true,
-            'source' => 'sftp',
-            'formats' => [],
-            'sftpHost' => $config['host'],
-            'remotePath' => $config['remote_path'],
-            'filesProcessed' => 0,
-            'totalFiles' => 0,
-            'totalOrders' => 0,
-            'totalLineItems' => 0,
-            'processedFileNames' => [],
-            'fileErrors' => [],
-            'orders' => []
-        ];
-    }
-    
-    $allOrders = [];
-    $filesProcessed = 0;
-    $fileErrors = [];
-    $formats = [];
-    $processedFileNames = [];
-    
-    foreach ($files as $fileInfo) {
-        $fileName = $fileInfo['filename'];
-        error_log("📄 Processing file: $fileName");
-        
-        try {
-            $xmlContent = $sftp->getFileContent($fileInfo['path']);
-            error_log("  ✓ File read: " . strlen($xmlContent) . " bytes");
-            
-            $result = $parser->parseXML($xmlContent);
-            error_log("  ✓ Parsed: " . $result['totalOrders'] . " orders, " . $result['totalLineItems'] . " line items");
-            
-            if (!isset($result['orders']) || !is_array($result['orders'])) {
-                throw new Exception("Invalid parse result - no orders array");
-            }
-            
-            if ($result['totalOrders'] === 0) {
-                error_log("  ⚠ WARNING: File parsed but contains 0 orders");
-            }
-            
-            $formats[] = $result['format'];
-            
-            foreach ($result['orders'] as $order) {
-                $order['sourceFile'] = $fileName;
-                $order['sourceType'] = 'sftp';
-                $order['sourceFormat'] = $result['format'];
-                $allOrders[] = $order;
-            }
-            
-            $processedFileNames[] = $fileName;
-            $filesProcessed++;
-            
-            error_log("  ✅ File parsing complete: $fileName");
-            
-        } catch (Exception $e) {
-            $fileErrors[] = [
-                'file' => $fileName,
-                'error' => $e->getMessage()
-            ];
-            error_log("  ❌ Parsing FAILED for $fileName: " . $e->getMessage());
-        }
-    }
-    
-    $sftp->disconnect();
-    error_log("SFTP Disconnected");
-    
-    $totalLineItems = 0;
-    foreach ($allOrders as $order) {
-        $totalLineItems += count($order['lineItems']);
-    }
-    
-    error_log("=== PARSING COMPLETE (FILES NOT ARCHIVED) ===");
-    error_log("Successfully parsed files: $filesProcessed");
-    error_log("Failed files: " . count($fileErrors));
-    error_log("Total orders extracted: " . count($allOrders));
-    error_log("Total line items: $totalLineItems");
-    error_log("Files to be archived by Salesforce: " . implode(', ', $processedFileNames));
-    error_log("=============================================");
-    
-    return [
-        'success' => true,
-        'source' => 'sftp',
-        'formats' => array_unique($formats),
-        'sftpHost' => $config['host'],
-        'remotePath' => $config['remote_path'],
-        'filesProcessed' => $filesProcessed,
-        'totalFiles' => count($files),
-        'totalOrders' => count($allOrders),
-        'totalLineItems' => $totalLineItems,
-        'processedFileNames' => $processedFileNames,
-        'fileErrors' => $fileErrors,
-        'orders' => $allOrders
-    ];
-}
-
-function archiveSpecificFiles($config, $fileNames) {
-    error_log("=== ARCHIVING PROCESSED FILES ===");
-    error_log("Files to archive: " . implode(', ', $fileNames));
-    
-    try {
-        $sftp = new SFTPConnection($config);
-        $sftp->connect();
-        error_log("✅ SFTP Connected for archiving");
-    } catch (Exception $e) {
-        error_log("❌ SFTP Connection failed: " . $e->getMessage());
-        return [
-            'success' => false,
-            'archivedCount' => 0,
-            'errorCount' => count($fileNames),
-            'archivedFiles' => [],
-            'errors' => ['SFTP Connection failed: ' . $e->getMessage()]
-        ];
-    }
-    
-    $sourcePath = $config['remote_path'];
-    $archivePath = '/Archived';
-    
-    $archived = [];
-    $errors = [];
-    
-    foreach ($fileNames as $fileName) {
-        $fileName = trim($fileName);
-        error_log("📦 Archiving: $fileName");
-        
-        try {
-            $sourceFile = rtrim($sourcePath, '/') . '/' . $fileName;
-            $destFile = rtrim($archivePath, '/') . '/' . $fileName;
-            
-            error_log("  Source: $sourceFile");
-            error_log("  Destination: $destFile");
-            
-            $content = $sftp->getFileContent($sourceFile);
-            error_log("  1. Read file: " . strlen($content) . " bytes");
-            
-            $tempFile = sys_get_temp_dir() . '/' . basename($fileName);
-            $bytesWritten = file_put_contents($tempFile, $content);
-            
-            if ($bytesWritten === false || $bytesWritten === 0) {
-                throw new Exception("Failed to create temp file");
-            }
-            error_log("  2. Created temp file: $tempFile ($bytesWritten bytes)");
-            
-            $sftp->uploadFile($tempFile, $destFile);
-            error_log("  3. Uploaded to: $destFile");
-            
-            try {
-                $verifyContent = $sftp->getFileContent($destFile);
-                if (strlen($verifyContent) !== strlen($content)) {
-                    throw new Exception("Upload verification failed - size mismatch");
-                }
-                error_log("  4. Upload verified (size matches)");
-            } catch (Exception $e) {
-                throw new Exception("Upload verification failed: " . $e->getMessage());
-            }
-            
-            try {
-                $sftp->deleteFile($sourceFile);
-                error_log("  5. Deleted from source: $sourceFile");
-            } catch (Exception $deleteEx) {
-                error_log("  ⚠ WARNING: Could not delete source file: " . $deleteEx->getMessage());
-                error_log("  ℹ File successfully archived but remains in source");
-            }
-            
-            if (file_exists($tempFile)) {
-                unlink($tempFile);
-            }
-            
-            $archived[] = $fileName;
-            error_log("  ✅ SUCCESSFULLY ARCHIVED: $fileName");
-            
-        } catch (Exception $e) {
-            $errors[] = "$fileName: " . $e->getMessage();
-            error_log("  ❌ ARCHIVE FAILED for $fileName: " . $e->getMessage());
-            error_log("  Error Line: " . $e->getLine());
-            
-            if (isset($tempFile) && file_exists($tempFile)) {
-                unlink($tempFile);
-            }
-            
-            error_log("  ⚠ File remains in source folder for retry");
-        }
-    }
-    
-    $sftp->disconnect();
-    error_log("SFTP Disconnected");
-    
-    error_log("=== ARCHIVE COMPLETE ===");
-    error_log("Successfully archived: " . count($archived));
-    error_log("Archive errors: " . count($errors));
-    error_log("========================");
-    
-    return [
-        'success' => count($errors) === 0,
-        'archivedCount' => count($archived),
-        'errorCount' => count($errors),
-        'archivedFiles' => $archived,
-        'errors' => $errors
-    ];
-}
-
-// ========================================
-// MAIN API LOGIC
-// ========================================
-
+// Main API Logic
 try {
-    $parser = new OrderXMLParser();
     $result = null;
     
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-        if (isset($_GET['action']) && $_GET['action'] === 'parseSftp') {
-            $result = parseSFTPFilesWithoutArchive($SFTP_CONFIG, $parser);
-        } else {
-            throw new Exception("Invalid GET action. Use ?action=parseSftp");
-        }
-    } 
-    elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        $input = json_decode(file_get_contents('php://input'), true);
         
-        if (!$input) {
-            throw new Exception("Invalid JSON in POST body");
+        // List files on SFTP server
+        if (isset($_GET['action']) && $_GET['action'] === 'listSftp') {
+            $sftp = new SFTPConnection($SFTP_CONFIG);
+            $sftp->connect();
+            
+            $files = $sftp->listFiles($SFTP_CONFIG['remote_path']);
+            $sftp->disconnect();
+            
+            $result = [
+                'success' => true,
+                'source' => 'sftp',
+                'sftpHost' => $SFTP_CONFIG['host'],
+                'remotePath' => $SFTP_CONFIG['remote_path'],
+                'totalFiles' => count($files),
+                'files' => $files
+            ];
+            
+            // Return JSON response
+            header('Content-Type: application/json');
+            http_response_code(200);
+            echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         }
-        
-        if (isset($input['action']) && $input['action'] === 'archiveFiles') {
-            if (!isset($input['files']) || !is_array($input['files'])) {
-                throw new Exception("Missing 'files' array in request body");
+        // Download raw XML file from SFTP
+        elseif (isset($_GET['file'])) {
+            $fileName = $_GET['file'];
+            
+            // Security: prevent directory traversal
+            $fileName = basename($fileName);
+            
+            // Validate file extension
+            if (!preg_match('/\.xml$/i', $fileName)) {
+                throw new Exception("Only XML files are supported");
             }
             
-            if (empty($input['files'])) {
-                throw new Exception("Empty 'files' array - nothing to archive");
+            // Connect to SFTP and get file content
+            $sftp = new SFTPConnection($SFTP_CONFIG);
+            $sftp->connect();
+            
+            $remotePath = $SFTP_CONFIG['remote_path'] . '/' . $fileName;
+            $xmlContent = $sftp->getFileContent($remotePath);
+            $sftp->disconnect();
+            
+            if ($xmlContent === false || empty($xmlContent)) {
+                throw new Exception("File not found or empty: $fileName");
             }
             
-            $result = archiveSpecificFiles($SFTP_CONFIG, $input['files']);
-        } else {
-            throw new Exception("Invalid POST action. Use action=archiveFiles with files array");
+            // Return raw XML content
+            header('Content-Type: application/xml');
+            header('Content-Disposition: inline; filename="' . $fileName . '"');
+            http_response_code(200);
+            echo $xmlContent;
         }
-    } 
-    else {
-        throw new Exception("Method not allowed. Use GET or POST.");
+        // Archive file (copy to Archived subfolder)
+        elseif (isset($_GET['action']) && $_GET['action'] === 'archive' && isset($_GET['file'])) {
+            $fileName = $_GET['file'];
+            
+            // Security: prevent directory traversal
+            $fileName = basename($fileName);
+            
+            // Validate file extension
+            if (!preg_match('/\.xml$/i', $fileName)) {
+                throw new Exception("Only XML files are supported");
+            }
+            
+            // Connect to SFTP and copy file
+            $sftp = new SFTPConnection($SFTP_CONFIG);
+            $sftp->connect();
+            
+            $sourceFile = $SFTP_CONFIG['remote_path'] . '/' . $fileName;
+            $destFile = $SFTP_CONFIG['remote_path'] . '/Archived/' . $fileName;
+            
+            $sftp->copyFile($sourceFile, $destFile);
+            $sftp->disconnect();
+            
+            $result = [
+                'success' => true,
+                'action' => 'archive',
+                'fileName' => $fileName,
+                'source' => $sourceFile,
+                'destination' => $destFile,
+                'message' => 'File copied to Archived folder successfully'
+            ];
+            
+            // Return JSON response
+            header('Content-Type: application/json');
+            http_response_code(200);
+            echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        }
+        // Delete file from main folder
+        elseif (isset($_GET['action']) && $_GET['action'] === 'delete' && isset($_GET['file'])) {
+            $fileName = $_GET['file'];
+            
+            // Security: prevent directory traversal
+            $fileName = basename($fileName);
+            
+            // Validate file extension
+            if (!preg_match('/\.xml$/i', $fileName)) {
+                throw new Exception("Only XML files are supported");
+            }
+            
+            // Connect to SFTP and delete file
+            $sftp = new SFTPConnection($SFTP_CONFIG);
+            $sftp->connect();
+            
+            $remotePath = $SFTP_CONFIG['remote_path'] . '/' . $fileName;
+            $sftp->deleteFile($remotePath);
+            $sftp->disconnect();
+            
+            $result = [
+                'success' => true,
+                'action' => 'delete',
+                'fileName' => $fileName,
+                'path' => $remotePath,
+                'message' => 'File deleted successfully'
+            ];
+            
+            // Return JSON response
+            header('Content-Type: application/json');
+            http_response_code(200);
+            echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        }
+        else {
+            throw new Exception("Invalid request. Use ?action=listSftp to list files, ?file=filename.xml to download, ?action=archive&file=filename.xml to archive, or ?action=delete&file=filename.xml to delete");
+        }
+        
+    } else {
+        throw new Exception("Method not allowed. Only GET requests are supported");
     }
     
-    http_response_code(200);
-    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    
 } catch (Exception $e) {
-    error_log("API ERROR: " . $e->getMessage());
-    error_log("Stack trace: " . $e->getTraceAsString());
-    
-    http_response_code(500);
+    // Error response
+    header('Content-Type: application/json');
+    http_response_code(400);
     echo json_encode([
         'success' => false,
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
-?>
-
