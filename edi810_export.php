@@ -21,7 +21,9 @@ $SFTP_CONFIG = [
     'port' => intval($_SERVER['HTTP_SFTP_PORT'] ?? getenv('SFTP_PORT') ?: 22),
     'username' => $_SERVER['HTTP_USERNAME'] ?? getenv('SFTP_USERNAME'),
     'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD'),
-    'remote_path' => '/EDI810_Invoices'
+    'remote_path' => (isset($_SERVER['HTTP_IS_PRODUCTION']) && $_SERVER['HTTP_IS_PRODUCTION'] === 'false')
+        ? (getenv('SFTP_UAT_REMOTE_PATH_INVOICE') ?: '/TSP/UAT/EDI810_Invoices')
+        : (getenv('SFTP_REMOTE_PATH_INVOICE') ?: '/TSP/UAT/EDI810_Invoices')
 ];
 
 // Validate configuration
@@ -206,3 +208,4 @@ try {
     ]);
 }
 ?>
+
