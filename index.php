@@ -373,40 +373,80 @@ class SFTPConnection {
      * Delete file from SFTP server
      */
     public function deleteFile($remoteFile) {
-        if ($this->sftp === 'curl') {
-            // cURL delete using CURLOPT_QUOTE with RM command
-            // Note: Use the raw path for the rm command, not URL-encoded
-            $url = sprintf(
-                "sftp://%s:%d/",
-                $this->config['host'],
-                $this->config['port']
-            );
-            
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, $url);
-            curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-            curl_setopt($ch, CURLOPT_QUOTE, array("rm " . $remoteFile));
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-            
-            $result = curl_exec($ch);
-            $error = curl_error($ch);
-            curl_close($ch);
-            
-            if ($error) {
-                throw new Exception("SFTP cURL Error: $error");
-            }
-            
-            return true;
+    if ($this->sftp === 'curl') {
+        // cURL delete using CURLOPT_QUOTE with RM command
+        $url = sprintf(
+            "sftp://%s:%d/",
+            $this->config['host'],
+            $this->config['port']
+        );
+        
+        // CRITICAL FIX: Add quotes around filename to handle spaces!
+        // Wrong: rm /EDI850_Orders/HEB Orders.xml  (breaks at space)
+        // Right: rm "/EDI850_Orders/HEB Orders.xml" (quotes protect space)
+        $rmCommand = 'rm "' . $remoteFile . '"';
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+        curl_setopt($ch, CURLOPT_QUOTE, array($rmCommand));
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        
+        $result = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($error) {
+            throw new Exception("SFTP cURL Error: $error");
         }
-        elseif (is_object($this->sftp)) {
-            // Using phpseclib
-            return $this->sftp->delete($remoteFile);
-        } else {
-            // Using native SSH2
-            return ssh2_sftp_unlink($this->sftp, $remoteFile);
-        }
+        
+        return true;
     }
+    elseif (is_object($this->sftp)) {
+        // Using phpseclib
+        return $this->sftp->delete($remoteFile);
+    } else {
+        // Using native SSH2
+        return ssh2_sftp_unlink($this->sftp, $remoteFile);
+    }
+
+    // public function deleteFile($remoteFile) {
+    //     if ($this->sftp === 'curl') {
+    //         // cURL delete using CURLOPT_QUOTE with RM command
+    //         // Note: Use the raw path for the rm command, not URL-encoded
+    //         $url = sprintf(
+    //             "sftp://%s:%d/",
+    //             $this->config['host'],
+    //             $this->config['port']
+    //         );
+            
+    //         $ch = curl_init();
+    //         curl_setopt($ch, CURLOPT_URL, $url);
+    //         curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
+    //         curl_setopt($ch, CURLOPT_QUOTE, array("rm " . $remoteFile));
+    //         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    //         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+            
+    //         $result = curl_exec($ch);
+    //         $error = curl_error($ch);
+    //         curl_close($ch);
+            
+    //         if ($error) {
+    //             throw new Exception("SFTP cURL Error: $error");
+    //         }
+            
+    //         return true;
+    //     }
+    //     elseif (is_object($this->sftp)) {
+    //         // Using phpseclib
+    //         return $this->sftp->delete($remoteFile);
+    //     } else {
+    //         // Using native SSH2
+    //         return ssh2_sftp_unlink($this->sftp, $remoteFile);
+    //     }
+    // }
     
     /**
      * Upload file content using cURL
@@ -605,6 +645,7 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
+
 
 
 
