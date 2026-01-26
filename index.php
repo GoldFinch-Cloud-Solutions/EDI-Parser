@@ -28,9 +28,7 @@ $SFTP_CONFIG = [
     'port' => $_SERVER['HTTP_SFTP_PORT'] ?? getenv('SFTP_PORT') ?: 22,
     'username' => $_SERVER['HTTP_USERNAME'] ?? getenv('SFTP_USERNAME'),
     'password' => $_SERVER['HTTP_PASSWORD'] ?? getenv('SFTP_PASSWORD'),
-    'remote_path' => (isset($_SERVER['HTTP_IS_PRODUCTION']) && $_SERVER['HTTP_IS_PRODUCTION'] === 'false')
-    ? ($_ENV['SFTP_UAT_REMOTE_PATH'] ?? getenv('SFTP_UAT_REMOTE_PATH') ?: '/TSP/UAT/EDI850_Orders')
-    : ($_ENV['SFTP_REMOTE_PATH'] ?? getenv('SFTP_REMOTE_PATH') ?: '/TSP/UAT/EDI850_Orders')
+    'remote_path' => (getenv('SFTP_REMOTE_PATH') ?? getenv('SFTP_REMOTE_PATH') ?: '/EDI850_Orders')
     // 'remote_path' => (isset($_SERVER['HTTP_IS_PRODUCTION']) && $_SERVER['HTTP_IS_PRODUCTION'] === 'false')
     //     ? (getenv('SFTP_UAT_REMOTE_PATH') ?: '/TSP/UAT/EDI850_Orders')
     //     : (getenv('SFTP_REMOTE_PATH') ?: '/TSP/UAT/EDI850_Orders')
@@ -607,6 +605,7 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
+
 
 
 
