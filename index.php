@@ -7,6 +7,9 @@
  * GET  /index.php?file=wc-orders.xml          (Download raw XML file from SFTP)
  * GET  /index.php?action=archive&file=wc-orders.xml  (Copy file to Archived subfolder)
  * GET  /index.php?action=delete&file=wc-orders.xml   (Delete file from main folder)
+ * 
+ * IMPORTANT: This API automatically strips CDATA sections from XML before sending to Apex
+ * because Apex's DOM parser has issues with CDATA handling.
  */
 
 header('Content-Type: application/json');
@@ -18,6 +21,25 @@ header('Access-Control-Allow-Headers: Content-Type');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
+}
+
+/**
+ * Strip CDATA sections from XML content
+ * Converts <element><![CDATA[value]]></element> to <element>value</element>
+ * 
+ * This is needed because Apex's DOM parser doesn't properly handle CDATA sections.
+ * By removing CDATA markers, we ensure Apex can read the text content directly.
+ * 
+ * @param string $xmlContent XML content with CDATA sections
+ * @return string XML content with CDATA sections removed
+ */
+function stripCDATA($xmlContent) {
+    // Replace CDATA sections with plain text
+    // Pattern: <![CDATA[...]]> (non-greedy match)
+    $pattern = '/<!\[CDATA\[(.*?)\]\]>/s';
+    $cleaned = preg_replace($pattern, '$1', $xmlContent);
+    
+    return $cleaned;
 }
 
 // ============================================
@@ -406,42 +428,6 @@ class SFTPConnection {
             return ssh2_sftp_unlink($this->sftp, $remoteFile);
         }
     }
-
-    // public function deleteFile($remoteFile) {
-    //     if ($this->sftp === 'curl') {
-    //         // cURL delete using CURLOPT_QUOTE with RM command
-    //         // Note: Use the raw path for the rm command, not URL-encoded
-    //         $url = sprintf(
-    //             "sftp://%s:%d/",
-    //             $this->config['host'],
-    //             $this->config['port']
-    //         );
-            
-    //         $ch = curl_init();
-    //         curl_setopt($ch, CURLOPT_URL, $url);
-    //         curl_setopt($ch, CURLOPT_USERPWD, $this->config['username'] . ':' . $this->config['password']);
-    //         curl_setopt($ch, CURLOPT_QUOTE, array("rm " . $remoteFile));
-    //         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    //         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-            
-    //         $result = curl_exec($ch);
-    //         $error = curl_error($ch);
-    //         curl_close($ch);
-            
-    //         if ($error) {
-    //             throw new Exception("SFTP cURL Error: $error");
-    //         }
-            
-    //         return true;
-    //     }
-    //     elseif (is_object($this->sftp)) {
-    //         // Using phpseclib
-    //         return $this->sftp->delete($remoteFile);
-    //     } else {
-    //         // Using native SSH2
-    //         return ssh2_sftp_unlink($this->sftp, $remoteFile);
-    //     }
-    // }
     
     /**
      * Upload file content using cURL
@@ -524,7 +510,7 @@ try {
             http_response_code(200);
             echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         }
-        // Download raw XML file from SFTP
+        // Download raw XML file from SFTP (WITH CDATA STRIPPED)
         elseif (isset($_GET['file']) && !isset($_GET['action'])) {
             $fileName = $_GET['file'];
             
@@ -548,7 +534,10 @@ try {
                 throw new Exception("File not found or empty: $fileName");
             }
             
-            // Return raw XML content
+            // CRITICAL: Strip CDATA sections before sending to Apex
+            $xmlContent = stripCDATA($xmlContent);
+            
+            // Return cleaned XML content
             header('Content-Type: application/xml');
             header('Content-Disposition: inline; filename="' . $fileName . '"');
             http_response_code(200);
@@ -640,12 +629,3 @@ try {
         'error' => $e->getMessage()
     ], JSON_PRETTY_PRINT);
 }
-
-
-
-
-
-
-
-
-
